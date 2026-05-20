@@ -1,0 +1,204 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Distributed Delivery System — Web Services API",
+    "description": "Public Web Service endpoints for third-party integration. Implements the Interoperability concept (Lecture 6) — any external HTTP client can consume these services using a standardized interface.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Distributed Delivery System"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://zpsdqvmqzxzazfsegfjv.supabase.co/functions/v1",
+      "description": "Supabase Edge Functions (Production)"
+    }
+  ],
+  "paths": {
+    "/track-order": {
+      "get": {
+        "summary": "Track Order Status (GET)",
+        "description": "Retrieve the current status and driver location for a specific order. This is a Web Service implementing the Request-Reply pattern. External partners, IoT devices, or third-party apps can call this endpoint.",
+        "operationId": "trackOrderGet",
+        "tags": ["Web Services", "Interoperability"],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "query",
+            "required": true,
+            "description": "UUID of the order to track",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "example": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order found — returns status and driver location",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackOrderResponse"
+                },
+                "example": {
+                  "success": true,
+                  "data": {
+                    "order_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                    "status": "in_transit",
+                    "restaurant_id": "r1234567-abcd-ef12-3456-7890abcdef12",
+                    "driver_id": "d1234567-abcd-ef12-3456-7890abcdef12",
+                    "total_amount": 45.50,
+                    "created_at": "2026-05-17T18:30:00.000Z",
+                    "driver_location": {
+                      "latitude": 24.7136,
+                      "longitude": 46.6753,
+                      "is_online": true,
+                      "last_updated": "2026-05-17T18:35:12.000Z"
+                    }
+                  },
+                  "service": "track-order",
+                  "version": "1.0.0",
+                  "timestamp": "2026-05-17T18:35:15.000Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing order_id parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackOrderResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Order not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackOrderResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackOrderResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Track Order Status (POST)",
+        "description": "Same as GET but accepts order_id in the request body.",
+        "operationId": "trackOrderPost",
+        "tags": ["Web Services", "Interoperability"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["order_id"],
+                "properties": {
+                  "order_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "UUID of the order to track"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Order found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackOrderResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "TrackOrderResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "Whether the request was successful"
+          },
+          "data": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "order_id": { "type": "string", "format": "uuid" },
+              "status": {
+                "type": "string",
+                "enum": ["pending", "accepted", "preparing", "ready_for_pickup", "picked_up", "in_transit", "delivered", "cancelled"]
+              },
+              "restaurant_id": { "type": "string", "format": "uuid" },
+              "driver_id": { "type": "string", "format": "uuid", "nullable": true },
+              "total_amount": { "type": "number" },
+              "created_at": { "type": "string", "format": "date-time" },
+              "driver_location": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "latitude": { "type": "number" },
+                  "longitude": { "type": "number" },
+                  "is_online": { "type": "boolean" },
+                  "last_updated": { "type": "string", "format": "date-time" }
+                }
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "Error message if success is false"
+          },
+          "service": {
+            "type": "string",
+            "description": "Service identifier"
+          },
+          "version": {
+            "type": "string",
+            "description": "API version"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server timestamp of the response"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Web Services",
+      "description": "RESTful Web Services for external consumption (Lecture 6)"
+    },
+    {
+      "name": "Interoperability",
+      "description": "Endpoints designed for cross-platform integration"
+    }
+  ]
+}
