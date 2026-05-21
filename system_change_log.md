@@ -892,3 +892,19 @@ NEXT_PUBLIC_APP_URL=https://localhost:3000
 - Shows address metadata if present
 - Gradient header matches user role color scheme
 - Back button navigates to role-appropriate dashboard
+
+### [2026-05-21] — Fix: Payment Flow & Vercel Deployment
+
+#### 1. Stripe Webhook Fix — Correct Order Flow
+- **Before**: Webhook set `status='accepted'` automatically on payment → skipped restaurant confirmation
+- **After**: Webhook only updates `payment_status='paid'`, order `status` stays `'pending'` until restaurant accepts
+- **Files**: `src/app/api/webhooks/stripe/route.ts`, `src/app/api/checkout/verify/route.ts`
+
+#### 2. Auto-detect Origin for Stripe Redirect
+- Checkout API now reads `origin` header from request instead of hardcoded `NEXT_PUBLIC_APP_URL`
+- Works on both localhost and Vercel without config changes
+- **File**: `src/app/api/checkout/route.ts`
+
+#### 3. Vercel Production Webhook
+- Stripe webhook endpoint registered in Stripe Dashboard → `https://delivery-system-wheat.vercel.app/api/webhooks/stripe`
+- No longer needs `stripe listen` for production

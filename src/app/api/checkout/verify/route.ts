@@ -54,19 +54,11 @@ export async function POST(req: NextRequest) {
     const session = await stripe.checkout.sessions.retrieve(order.stripe_session_id);
 
     if (session.payment_status === "paid") {
-      // Use RPC (SECURITY DEFINER) to update — works with anon key
-      const { error: rpcErr } = await supabase.rpc("confirm_stripe_payment", {
-        p_order_id: order_id,
-        p_session_id: session.id,
-      });
-
-      if (rpcErr) {
-        console.error("[Verify] RPC failed, trying direct update:", rpcErr.message);
-        await supabase
-          .from("orders")
-          .update({ payment_status: "paid", status: "accepted" })
-          .eq("id", order_id);
-      }
+      // Only update payment_status — restaurant must manually accept
+      await supabase
+        .from("orders")
+        .update({ payment_status: "paid", stripe_session_id: session.id })
+        .eq("id", order_id);
 
       return NextResponse.json({ payment_status: "paid", updated: true });
     }

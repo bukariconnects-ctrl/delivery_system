@@ -65,44 +65,20 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Missing order_id" }, { status: 400 });
       }
 
-      // Try RPC first (SECURITY DEFINER — works with anon key)
-      const { data: rpcResult, error: rpcError } = await supabase.rpc(
-        "confirm_stripe_payment",
-        { p_order_id: orderId, p_session_id: session.id }
-      );
+      // Update only payment_status — restaurant must manually accept the order
+      const { error } = await supabase
+        .from("orders")
+        .update({
+          payment_status: "paid",
+          stripe_session_id: session.id,
+        })
+        .eq("id", orderId);
 
-      if (rpcError) {
-        console.log(`[Webhook] RPC not available (${rpcError.message}), trying direct update...`);
-
-        // Fallback: direct update
-        const { error } = await supabase
-          .from("orders")
-          .update({
-            payment_status: "paid",
-            status: "accepted",
-            stripe_session_id: session.id,
-          })
-          .eq("id", orderId);
-
-        if (error) {
-          console.error("[Webhook] Direct update failed:", JSON.stringify(error));
-          // Last resort: update only status
-          const { error: statusError } = await supabase
-            .from("orders")
-            .update({ status: "accepted" })
-            .eq("id", orderId);
-
-          if (statusError) {
-            console.error("[Webhook] Status-only update also failed:", JSON.stringify(statusError));
-            return NextResponse.json({ error: "Failed to update order" }, { status: 500 });
-          }
-          console.log(`[Webhook] Order ${orderId} → accepted (status only)`);
-        } else {
-          console.log(`[Webhook] Order ${orderId} → paid + accepted (direct)`);
-        }
-      } else {
-        console.log(`[Webhook] Order ${orderId} → paid + accepted (RPC)`, rpcResult);
+      if (error) {
+        console.error("[Webhook] Update failed:", JSON.stringify(error));
+        return NextResponse.json({ error: "Failed to update order" }, { status: 500 });
       }
+      console.log(`[Webhook] Order ${orderId} → payment_status=paid (awaiting restaurant acceptance)`);
       break;
     }
 
