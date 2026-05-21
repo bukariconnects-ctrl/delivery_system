@@ -34,7 +34,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+    // Auto-detect origin from request (works on both localhost and Vercel)
+    const origin = req.headers.get("origin") || req.headers.get("referer")?.replace(/\/[^/]*$/, "") || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+    const appUrl = origin.replace(/\/$/, "");
 
     // Build Stripe line items from order items
     const lineItems = (items ?? []).map((it: any) => ({
