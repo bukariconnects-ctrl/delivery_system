@@ -20,9 +20,16 @@ import {
   CheckCircle2,
   Eye,
   Loader2,
+  ChevronLeft,
+  ChevronRight,
+  ArrowLeft,
+  File,
+  Trash2,
+  Ban,
 } from "lucide-react";
 import { DFSClient } from "@/lib/supabase/dfs-client";
 import type { UserProfile, Order, Restaurant, DriverLocation } from "@/types";
+import toast from "react-hot-toast";
 
 // ============================================
 // Admin Dashboard — The System Orchestrator
@@ -55,8 +62,14 @@ export default function AdminDashboard() {
   const [latency, setLatency] = useState<number | null>(null);
   const [tab, setTab] = useState<"health" | "approvals" | "users" | "orders" | "nodes" | "dfs">("health");
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectConfirmId, setRejectConfirmId] = useState<string | null>(null);
   const [docPreviewUrl, setDocPreviewUrl] = useState<string | null>(null);
-  const [docPreviewUser, setDocPreviewUser] = useState<string | null>(null);
+  const [docPreviewTitle, setDocPreviewTitle] = useState<string | null>(null);
+
+  // DFS Explorer navigation state
+  const [dfsPath, setDfsPath] = useState<string>("");
+  const [dfsBreadcrumbs, setDfsBreadcrumbs] = useState<string[]>([]);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -76,14 +89,14 @@ export default function AdminDashboard() {
     if (restaurantsRes.data) setRestaurants(restaurantsRes.data);
     if (driversRes.data) setDrivers(driversRes.data);
 
-    // DFS files
+    // DFS files at current path
     const { data: files } = await supabase.storage
       .from("delivery-dfs")
-      .list("", { limit: 100, sortBy: { column: "created_at", order: "desc" } });
+      .list(dfsPath, { limit: 100, sortBy: { column: "created_at", order: "desc" } });
     if (files) setDfsFiles(files as DFSFile[]);
 
     setLoading(false);
-  }, [supabase]);
+  }, [supabase, dfsPath]);
 
   useEffect(() => {
     fetchAll();
@@ -108,13 +121,49 @@ export default function AdminDashboard() {
     setVerifyingId(null);
   };
 
-  // Preview uploaded identity document from DFS
-  const handlePreviewDoc = async (userId: string, ufid: string) => {
+  // Preview uploaded document from DFS via signed URL
+  const handlePreviewDoc = async (path: string, title: string) => {
     const dfs = new DFSClient(supabase);
-    const path = `drivers/${userId}/identity/${ufid}`;
     const url = await dfs.getUrl(path, 600);
+    if (!url) {
+      toast.error("لا يمكن عرض الملف — قد يكون غير موجود في التخزين");
+      return;
+    }
     setDocPreviewUrl(url);
-    setDocPreviewUser(userId);
+    setDocPreviewTitle(title);
+  };
+
+  // Reject a node (remove unverified user)
+  const handleRejectNode = async (userId: string) => {
+    setRejectingId(userId);
+    const { error } = await supabase
+      .from("profiles")
+      .delete()
+      .eq("id", userId);
+    if (error) {
+      toast.error(`فشل الرفض: ${error.message}`);
+    } else {
+      toast.success("تم رفض الطلب وإزالته");
+      setRejectConfirmId(null);
+      await fetchAll();
+    }
+    setRejectingId(null);
+  };
+
+  // DFS navigation helpers
+  const navigateDfs = (folderName: string) => {
+    const newPath = dfsPath ? `${dfsPath}/${folderName}` : folderName;
+    setDfsPath(newPath);
+    setDfsBreadcrumbs((prev) => [...prev, folderName]);
+  };
+
+  const navigateDfsUp = () => {
+    if (!dfsPath) return;
+    const parts = dfsPath.split("/");
+    parts.pop();
+    const newPath = parts.join("/");
+    setDfsPath(newPath);
+    setDfsBreadcrumbs((prev) => prev.slice(0, -1));
   };
 
   const pendingProfiles = profiles.filter((p) => !p.is_verified && p.role !== "admin");
@@ -219,14 +268,14 @@ export default function AdminDashboard() {
         <div className="space-y-6">
           {/* Document Preview Modal */}
           {docPreviewUrl && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => { setDocPreviewUrl(null); setDocPreviewUser(null); }}>
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => { setDocPreviewUrl(null); setDocPreviewTitle(null); }}>
               <div className="max-h-[80vh] max-w-2xl overflow-auto rounded-xl bg-white p-4 shadow-2xl dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
                 <div className="mb-3 flex items-center justify-between">
-                  <p className="text-sm font-semibold text-gray-700 dark:text-gray-300">Document Preview</p>
-                  <button onClick={() => { setDocPreviewUrl(null); setDocPreviewUser(null); }} className="text-gray-400 hover:text-gray-600">✕</button>
+                  <p className="text-sm font-semibold text-gray-700 dark:text-gray-300">{docPreviewTitle ?? "Document Preview"}</p>
+                  <button onClick={() => { setDocPreviewUrl(null); setDocPreviewTitle(null); }} className="text-gray-400 hover:text-gray-600">✕</button>
                 </div>
-                <img src={docPreviewUrl} alt="Identity Document" className="max-w-full rounded-lg" />
-                <p className="mt-2 text-center text-[10px] font-mono text-gray-400">User: {docPreviewUser?.slice(0, 16)}...</p>
+                <img src={docPreviewUrl} alt="Document" className="max-w-full rounded-lg" />
+                <p className="mt-2 text-center text-[10px] font-mono text-gray-400">Signed URL • 10 min expiry</p>
               </div>
             </div>
           )}
@@ -279,21 +328,52 @@ export default function AdminDashboard() {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        {p.id_document_ufid ? (
-                          <button onClick={() => handlePreviewDoc(p.id, p.id_document_ufid!)}
-                            className="flex items-center gap-1 text-xs text-blue-600 hover:underline">
-                            <Eye size={12} /> View ID
-                          </button>
-                        ) : (
-                          <span className="text-xs text-gray-400">No docs</span>
-                        )}
+                        <div className="flex flex-col gap-1.5">
+                          {p.id_document_ufid ? (
+                            <button onClick={() => handlePreviewDoc(`drivers/${p.id}/identity/${p.id_document_ufid}`, `ID Document — ${p.full_name ?? p.id.slice(0, 8)}`)}
+                              className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-1 text-xs text-blue-700 hover:bg-blue-100 dark:bg-blue-900/30 dark:text-blue-300">
+                              <Eye size={12} /> بطاقة الهوية
+                            </button>
+                          ) : (
+                            <span className="text-xs text-gray-400">—</span>
+                          )}
+                          {p.driver_license_ufid ? (
+                            <button onClick={() => handlePreviewDoc(`drivers/${p.id}/identity/${p.driver_license_ufid}`, `License — ${p.full_name ?? p.id.slice(0, 8)}`)}
+                              className="inline-flex items-center gap-1 rounded-md bg-green-50 px-2 py-1 text-xs text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:text-green-300">
+                              <FileText size={12} /> رخصة القيادة
+                            </button>
+                          ) : (
+                            <span className="text-xs text-gray-400">—</span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3">
-                        <button onClick={() => handleVerifyNode(p.id)} disabled={verifyingId === p.id}
-                          className="flex items-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50">
-                          {verifyingId === p.id ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
-                          تحقق
-                        </button>
+                        <div className="flex flex-col gap-1.5">
+                          <button onClick={() => handleVerifyNode(p.id)} disabled={verifyingId === p.id}
+                            className="flex items-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50">
+                            {verifyingId === p.id ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                            تحقق
+                          </button>
+                          {rejectConfirmId === p.id ? (
+                            <div className="flex items-center gap-1">
+                              <button onClick={() => handleRejectNode(p.id)} disabled={rejectingId === p.id}
+                                className="flex items-center gap-1 rounded-lg bg-red-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-red-700 disabled:opacity-50">
+                                {rejectingId === p.id ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />}
+                                تأكيد
+                              </button>
+                              <button onClick={() => setRejectConfirmId(null)}
+                                className="rounded-lg bg-gray-100 px-2 py-1 text-[10px] font-medium text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300">
+                                إلغاء
+                              </button>
+                            </div>
+                          ) : (
+                            <button onClick={() => setRejectConfirmId(p.id)}
+                              className="flex items-center gap-1 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-900/20">
+                              <Ban size={12} />
+                              رفض
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -445,32 +525,271 @@ export default function AdminDashboard() {
       {/* ═══ TAB: DFS Explorer ═══ */}
       {tab === "dfs" && (
         <div className="rounded-xl border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-900">
-          <h3 className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300">
-            <FolderOpen size={16} className="text-purple-500" />
-            delivery-dfs Bucket
-          </h3>
-          {dfsFiles.length === 0 ? (
-            <p className="text-sm text-gray-400">لا توجد ملفات في الـ DFS bucket بعد</p>
-          ) : (
-            <div className="space-y-2">
-              {dfsFiles.map((f) => (
+          <div className="mb-4 flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300">
+              <FolderOpen size={16} className="text-purple-500" />
+              delivery-dfs Bucket
+            </h3>
+            {dfsPath && (
+              <button onClick={navigateDfsUp}
+                className="inline-flex items-center gap-1 rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700">
+                <ArrowLeft size={12} /> رجوع
+              </button>
+            )}
+          </div>
+
+          {/* Breadcrumbs */}
+          {dfsBreadcrumbs.length > 0 && (
+            <div className="mb-4 flex items-center gap-1 text-xs text-gray-500">
+              <span className="cursor-pointer hover:text-purple-600" onClick={() => { setDfsPath(""); setDfsBreadcrumbs([]); }}>root</span>
+              {dfsBreadcrumbs.map((crumb, i) => (
+                <span key={i} className="flex items-center gap-1">
+                  <ChevronLeft size={10} />
+                  <span className={i === dfsBreadcrumbs.length - 1 ? "font-medium text-gray-700 dark:text-gray-300" : ""}>{crumb}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Root level — always show the 3 DFS roots */}
+          {!dfsPath && (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              {[
+                { name: "drivers", label: "السائقين", desc: "Identity documents", color: "text-blue-600", bg: "bg-blue-50 dark:bg-blue-950/40 dark:text-blue-300" },
+                { name: "restaurants", label: "المطاعم", desc: "Menu images & data", color: "text-orange-600", bg: "bg-orange-50 dark:bg-orange-950/40 dark:text-orange-300" },
+                { name: "orders", label: "الطلبات", desc: "Order attachments", color: "text-green-600", bg: "bg-green-50 dark:bg-green-950/40 dark:text-green-300" },
+              ].map((root) => (
                 <div
-                  key={f.name}
-                  className="flex items-center gap-3 rounded-lg bg-gray-50 px-4 py-2.5 dark:bg-gray-800"
+                  key={root.name}
+                  onClick={() => navigateDfs(root.name)}
+                  className="cursor-pointer rounded-xl border border-gray-100 bg-gray-50 p-4 transition-colors hover:border-purple-200 hover:bg-purple-50 dark:border-gray-700 dark:bg-gray-800 dark:hover:border-purple-700 dark:hover:bg-purple-900/20"
                 >
-                  <FolderOpen size={14} className="text-gray-400" />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-gray-700 dark:text-gray-300">{f.name}</p>
-                    {f.updated_at && (
-                      <p className="text-[10px] text-gray-400">
-                        {new Date(f.updated_at).toLocaleString("ar-SA")}
-                      </p>
-                    )}
+                  <div className="mb-3 flex items-center justify-between">
+                    <FolderOpen size={24} className={root.color} />
+                    <ChevronRight size={14} className="text-gray-400" />
                   </div>
+                  <p className="text-sm font-semibold text-gray-800 dark:text-gray-200">{root.label}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">{root.desc}</p>
+                  <p className="mt-1 font-mono text-[10px] text-gray-400">/{root.name}</p>
                 </div>
               ))}
             </div>
           )}
+
+          {/* Intelligent path-based rendering */}
+          {(() => {
+            const parts = dfsPath.split("/").filter(Boolean);
+            const root = parts[0];
+            const depth = parts.length;
+
+            /* ── drivers branch ── */
+            if (root === "drivers") {
+              if (depth === 1) {
+                // Show each driver as a folder
+                const driverProfiles = profiles.filter((p) => p.role === "driver");
+                if (driverProfiles.length === 0) {
+                  return (
+                    <div className="rounded-lg border border-dashed border-gray-200 py-12 text-center dark:border-gray-700">
+                      <FolderOpen size={32} className="mx-auto mb-2 text-gray-300 dark:text-gray-600" />
+                      <p className="text-sm text-gray-400">لا يوجد سائقون مسجّلون</p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {driverProfiles.map((d) => (
+                      <div key={d.id} onClick={() => navigateDfs(d.id)}
+                        className="flex cursor-pointer items-center gap-3 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 transition-colors hover:bg-blue-50 dark:border-gray-800 dark:bg-gray-800 dark:hover:bg-blue-900/20">
+                        <FolderOpen size={18} className="text-blue-500" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">{d.full_name ?? "سائق"}</p>
+                          <p className="font-mono text-[10px] text-gray-400">{d.id.slice(0, 20)}...</p>
+                        </div>
+                        <ChevronRight size={14} className="text-gray-400" />
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+              if (depth === 2) {
+                // Inside a driver folder — show identity folder
+                return (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    <div onClick={() => navigateDfs("identity")}
+                      className="flex cursor-pointer items-center gap-3 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 transition-colors hover:bg-purple-50 dark:border-gray-800 dark:bg-gray-800 dark:hover:bg-purple-900/20">
+                      <FolderOpen size={18} className="text-purple-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-gray-800 dark:text-gray-200">identity</p>
+                        <p className="text-[10px] text-gray-400">بطاقة الهوية + رخصة القيادة</p>
+                      </div>
+                      <ChevronRight size={14} className="text-gray-400" />
+                    </div>
+                  </div>
+                );
+              }
+              if (depth >= 3) {
+                // Inside identity folder — list actual files from dfsFiles
+                return dfsFiles.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-gray-200 py-12 text-center dark:border-gray-700">
+                    <File size={32} className="mx-auto mb-2 text-gray-300 dark:text-gray-600" />
+                    <p className="text-sm text-gray-400">لا توجد وثائق مرفوعة لهذا السائق</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {dfsFiles.map((f) => (
+                      <div key={f.name}
+                        className="flex items-center gap-3 rounded-xl border border-gray-100 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-900">
+                        <File size={18} className="text-gray-400" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-gray-600 dark:text-gray-400">{f.name}</p>
+                          {f.updated_at && (
+                            <p className="text-[10px] text-gray-400">{new Date(f.updated_at).toLocaleString("ar-SA")}</p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+            }
+
+            /* ── restaurants branch ── */
+            if (root === "restaurants") {
+              if (depth === 1) {
+                const restList = restaurants;
+                if (restList.length === 0) {
+                  return (
+                    <div className="rounded-lg border border-dashed border-gray-200 py-12 text-center dark:border-gray-700">
+                      <FolderOpen size={32} className="mx-auto mb-2 text-gray-300 dark:text-gray-600" />
+                      <p className="text-sm text-gray-400">لا يوجد مطاعم مسجّلة</p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {restList.map((r) => (
+                      <div key={r.id} onClick={() => navigateDfs(r.id)}
+                        className="flex cursor-pointer items-center gap-3 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 transition-colors hover:bg-orange-50 dark:border-gray-800 dark:bg-gray-800 dark:hover:bg-orange-900/20">
+                        <FolderOpen size={18} className="text-orange-500" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">{r.name}</p>
+                          <p className="font-mono text-[10px] text-gray-400">{r.id.slice(0, 20)}...</p>
+                        </div>
+                        <ChevronRight size={14} className="text-gray-400" />
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+              if (depth === 2) {
+                return (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    <div onClick={() => navigateDfs("menu")}
+                      className="flex cursor-pointer items-center gap-3 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 transition-colors hover:bg-purple-50 dark:border-gray-800 dark:bg-gray-800 dark:hover:bg-purple-900/20">
+                      <FolderOpen size={18} className="text-purple-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-gray-800 dark:text-gray-200">menu</p>
+                        <p className="text-[10px] text-gray-400">صور الوجبات</p>
+                      </div>
+                      <ChevronRight size={14} className="text-gray-400" />
+                    </div>
+                  </div>
+                );
+              }
+              if (depth >= 3) {
+                return dfsFiles.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-gray-200 py-12 text-center dark:border-gray-700">
+                    <File size={32} className="mx-auto mb-2 text-gray-300 dark:text-gray-600" />
+                    <p className="text-sm text-gray-400">لا توجد صور في قائمة هذا المطعم</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {dfsFiles.map((f) => (
+                      <div key={f.name}
+                        className="flex items-center gap-3 rounded-xl border border-gray-100 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-900">
+                        <File size={18} className="text-gray-400" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-gray-600 dark:text-gray-400">{f.name}</p>
+                          {f.updated_at && (
+                            <p className="text-[10px] text-gray-400">{new Date(f.updated_at).toLocaleString("ar-SA")}</p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+            }
+
+            /* ── orders branch ── */
+            if (root === "orders") {
+              if (depth === 1) {
+                if (orders.length === 0) {
+                  return (
+                    <div className="rounded-lg border border-dashed border-gray-200 py-12 text-center dark:border-gray-700">
+                      <FolderOpen size={32} className="mx-auto mb-2 text-gray-300 dark:text-gray-600" />
+                      <p className="text-sm text-gray-400">لا يوجد طلبات مسجّلة</p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {orders.map((o) => (
+                      <div key={o.id} onClick={() => navigateDfs(o.id)}
+                        className="flex cursor-pointer items-center gap-3 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 transition-colors hover:bg-green-50 dark:border-gray-800 dark:bg-gray-800 dark:hover:bg-green-900/20">
+                        <FolderOpen size={18} className="text-green-500" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">طلب #{o.id.slice(0, 8)}</p>
+                          <p className="text-[10px] text-gray-400">{o.status} • {Number(o.total_amount).toFixed(2)} SAR</p>
+                        </div>
+                        <ChevronRight size={14} className="text-gray-400" />
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+              if (depth === 2) {
+                return (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    <div onClick={() => navigateDfs("receipts")}
+                      className="flex cursor-pointer items-center gap-3 rounded-xl border border-gray-100 bg-gray-50 px-4 py-3 transition-colors hover:bg-purple-50 dark:border-gray-800 dark:bg-gray-800 dark:hover:bg-purple-900/20">
+                      <FolderOpen size={18} className="text-purple-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-gray-800 dark:text-gray-200">receipts</p>
+                        <p className="text-[10px] text-gray-400">فواتير الطلب</p>
+                      </div>
+                      <ChevronRight size={14} className="text-gray-400" />
+                    </div>
+                  </div>
+                );
+              }
+              if (depth >= 3) {
+                return dfsFiles.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-gray-200 py-12 text-center dark:border-gray-700">
+                    <File size={32} className="mx-auto mb-2 text-gray-300 dark:text-gray-600" />
+                    <p className="text-sm text-gray-400">لا توجد مرفقات لهذا الطلب</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {dfsFiles.map((f) => (
+                      <div key={f.name}
+                        className="flex items-center gap-3 rounded-xl border border-gray-100 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-900">
+                        <File size={18} className="text-gray-400" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-gray-600 dark:text-gray-400">{f.name}</p>
+                          {f.updated_at && (
+                            <p className="text-[10px] text-gray-400">{new Date(f.updated_at).toLocaleString("ar-SA")}</p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+            }
+
+            return null;
+          })()}
           <p className="mt-4 text-center text-[10px] text-gray-400">
             Hierarchical DFS • UFID • Supabase Storage • Client-side Caching
           </p>

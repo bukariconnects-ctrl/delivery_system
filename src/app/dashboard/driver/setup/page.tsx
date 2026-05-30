@@ -115,17 +115,24 @@ export default function DriverSetup() {
     };
     if (licenseUfid) vehicleDetails.license_ufid = licenseUfid;
 
-    await supabase
+    const { error: profileError } = await supabase
       .from("profiles")
       .update({
         vehicle_details: vehicleDetails,
         id_document_ufid: idUfid,
+        driver_license_ufid: licenseUfid,
         updated_at: new Date().toISOString(),
       })
       .eq("id", session.user.id);
 
+    if (profileError) {
+      toast.error(`فشل حفظ البيانات: ${profileError.message}`);
+      setSaving(false);
+      return;
+    }
+
     // Also ensure driver_locations row exists
-    await supabase
+    const { error: locError } = await supabase
       .from("driver_locations")
       .upsert({
         driver_id: session.user.id,
@@ -134,17 +141,65 @@ export default function DriverSetup() {
         is_online: false,
       });
 
+    if (locError) {
+      toast.error(`فشل إنشاء موقع السائق: ${locError.message}`);
+      setSaving(false);
+      return;
+    }
+
     toast.success("تم حفظ بيانات السائق");
     setSaving(false);
   };
 
-  // Complete setup
-  const handleComplete = () => {
+  // Complete setup — saves everything then redirects
+  const handleComplete = async () => {
     if (!vehicleModel.trim() || !plateNumber.trim()) {
       toast.error("أكمل بيانات المركبة أولاً");
       return;
     }
+    if (!session?.user) return;
+
+    setSaving(true);
+
+    const vehicleDetails: Record<string, string> = {
+      model: vehicleModel.trim(),
+      plate_number: plateNumber.trim(),
+    };
+    if (licenseUfid) vehicleDetails.license_ufid = licenseUfid;
+
+    const { error: profileError } = await supabase
+      .from("profiles")
+      .update({
+        vehicle_details: vehicleDetails,
+        id_document_ufid: idUfid,
+        driver_license_ufid: licenseUfid,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", session.user.id);
+
+    if (profileError) {
+      toast.error(`فشل حفظ البيانات: ${profileError.message}`);
+      setSaving(false);
+      return;
+    }
+
+    const { error: locError } = await supabase
+      .from("driver_locations")
+      .upsert({
+        driver_id: session.user.id,
+        current_latitude: 0,
+        current_longitude: 0,
+        is_online: false,
+      });
+
+    if (locError) {
+      toast.error(`فشل إنشاء موقع السائق: ${locError.message}`);
+      setSaving(false);
+      return;
+    }
+
     toast.success("تم إعداد السائق — بانتظار التحقق من المدير");
+    setSaving(false);
     router.push("/dashboard/driver");
   };
 

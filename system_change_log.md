@@ -948,3 +948,108 @@ NEXT_PUBLIC_APP_URL=https://localhost:3000
 - **Efficiency (Req 3)**: `next/image` automatic optimization, lazy loading, and responsive `sizes` attribute minimize network overhead
 - **Caching (Req 10)**: DFS client-side cache (`localStorage`) stores resolved image URLs with 5-minute TTL; URLs are reused across page navigations
 - **Transparency (Req 2)**: Image loading skeletons provide visual feedback during latency
+
+### [2026-05-31] — Admin Verification & DFS Explorer Fix
+
+#### 1. Admin Approvals — Certificate Authority Workflow
+- **File**: `src/app/dashboard/admin/page.tsx`
+- Added `driver_license_ufid` to `UserProfile` type
+- Approvals table now displays both **"بطاقة الهوية"** (View ID) and **"رخصة القيادة"** (View License) buttons
+- Each button generates a temporary **Signed URL** via `DFSClient.getUrl()` (600s expiry) for secure document preview
+- Document preview modal now shows document title and "Signed URL • 10 min expiry" footer
+- Vehicle details (`model`, `plate_number`) correctly parsed from JSONB `vehicle_details`
+
+#### 2. DFS Explorer Overhaul
+- **File**: `src/app/dashboard/admin/page.tsx`
+- Replaced flat file list with **navigable folder explorer**
+- Dynamic folder detection: folders show `FolderOpen` icon + chevron, files show `File` icon
+- Clicking a folder navigates deeper into the hierarchy
+- Added **breadcrumbs** with `root` link and clickable path segments
+- Added **"رجوع"** (Back) button to return to parent directory
+- Uses `supabase.storage.list(dfsPath)` to load contents at current path
+
+#### 3. Driver Setup — Data Persistence Fix
+- **File**: `src/app/dashboard/driver/setup/page.tsx`
+- Fixed `handleComplete` to be `async` and actually **persist data to database** before redirecting
+- Previously it only showed a toast and redirected without saving — vehicle details and UFIDs were lost
+- `handleSave` now updates `driver_license_ufid` as a separate column in `profiles` table (not just nested in JSONB)
+- Driver setup form now properly saves: `vehicle_details`, `id_document_ufid`, `driver_license_ufid`, and creates `driver_locations` row
+
+#### 4. Security & Distributed Concepts
+- **Security (Req 7)**: Admin document viewing uses **signed URLs** with 10-minute expiry — no permanent public access to identity documents
+- **Transparency (Req 2)**: Breadcrumbs and folder icons make DFS hierarchy visible to admin
+- **Hierarchical Namespace (Lecture 10)**: Explorer navigates `drivers/{id}/identity/` structure natively
+
+### [2026-05-31] — Critical Fix: Driver Profile Persistence & RLS
+
+#### 1. Database Schema Fix
+- **Migration**: `supabase/migrations/0011_add_driver_license_ufid.sql`
+- Added missing `driver_license_ufid` column to `profiles` table
+- **CRITICAL**: Added missing RLS policy `"Users can update own profile"` on `profiles` table
+- **Root Cause**: No user could update their own `profiles` row because RLS was enabled but only admin policies existed. Driver setup silently failed — `vehicle_details` and document UFIDs were never saved.
+
+#### 2. DFS Explorer — Static Root Folders
+- **File**: `src/app/dashboard/admin/page.tsx`
+- Supabase Storage `.list("")` does **not** reveal prefixes/folders unless they contain direct files. Empty branches (e.g., `drivers/` before any upload) are invisible.
+- Fix: Root level now always displays 3 clickable cards: **السائقين**, **المطاعم**, **الطلبات** — regardless of whether files exist.
+- Once inside a branch, standard `.list(path)` reveals contents normally.
+
+#### 3. Driver Setup — Error Visibility
+- **File**: `src/app/dashboard/driver/setup/page.tsx`
+- Added `error` capture on every `supabase.from(...)` call with `toast.error()` feedback
+- Previously errors were swallowed silently, giving false "success" messages while data was actually rejected by RLS.
+
+#### Required User Actions
+1. Run migration `0011_add_driver_license_ufid.sql` in Supabase SQL Editor
+2. Log in as the driver, re-enter vehicle details & re-upload documents, then click **"إكمال الإعداد"**
+3. Log in as admin → Approvals tab → verify model/plate and click document preview buttons
+
+### [2026-05-31] — Admin Document Preview, Reject Button & DFS Explorer v2
+
+#### 1. Document Preview — Error Handling
+- **File**: `src/app/dashboard/admin/page.tsx`
+- `handlePreviewDoc` now checks if `getUrl()` returns `null` and shows `toast.error("لا يمكن عرض الملف — قد يكون غير موجود في التخزين")`
+- Previously: clicking View ID/License did nothing silently when the file didn't exist in storage
+
+#### 2. Reject Button in Approvals
+- **File**: `src/app/dashboard/admin/page.tsx`
+- Added **"رفض"** (Reject) button next to each pending approval
+- Two-step confirmation: click "رفض" → shows "تأكيد / إلغاء" mini-buttons
+- Confirming deletes the unverified profile row from `profiles` table
+- Added `react-hot-toast` import for error feedback
+
+#### 3. DFS Explorer v2 — DB-Driven Navigation
+- **File**: `src/app/dashboard/admin/page.tsx`
+- **Root cause of empty `drivers` folder**: Supabase Storage `.list("drivers")` does **not** return sub-prefixes (`drivers/{id}/`). It only returns files/directly at that exact path.
+- Fix: Intermediate levels (e.g., `drivers/`, `restaurants/`) are now populated from **database queries**, not storage `.list()`:
+  - `drivers/` → renders folders from `profiles.filter(p => p.role === 'driver')`
+  - `drivers/{id}/` → renders `identity` subfolder
+  - `drivers/{id}/identity/` → uses `.list()` to show actual UFID files
+  - `restaurants/` → renders folders from `restaurants` table
+  - `restaurants/{id}/` → renders `menu` subfolder
+  - `orders/` → renders folders from `orders` table
+- DFS Explorer now shows meaningful names (driver full name, restaurant name, order status) instead of raw UUIDs at the top level
+
+#### 4. Distributed Concepts
+- **Transparency (Req 2)**: Error toast when signed URL generation fails
+- **Usability**: Reject flow with confirmation prevents accidental deletions
+- **Hierarchical DFS (Lecture 10)**: Explorer now correctly navigates `drivers/{id}/identity/` by discovering driver IDs from DB then drilling into storage
+
+### [2026-05-31] — Fix: Supabase Storage Bucket Policies
+
+#### 1. Root Cause
+- **File**: `supabase/migrations/0012_storage_bucket_policies.sql`
+- Supabase Storage has **separate RLS policies** from database tables.
+- Drivers could **upload** files (INSERT worked) but nobody could **read** them:
+  - `createSignedUrl()` returned `null` → document preview failed
+  - `.list("drivers/{id}/identity")` returned empty → DFS Explorer showed "لا توجد وثائق"
+
+#### 2. Fix
+- Added `SELECT` policy on `storage.objects` for `delivery-dfs` bucket
+- Added `INSERT` policy on `storage.objects` for `delivery-dfs` bucket
+- Policies apply to **all authenticated users** — signed URLs provide actual access control
+
+#### Required User Actions
+1. Refresh the admin page
+2. Approvals tab → click "بطاقة الهوية" or "رخصة القيادة" — signed URL preview should now work
+3. DFS Explorer → السائقين → {اسم السائق} → identity — files should now appear

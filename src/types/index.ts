@@ -34,6 +34,7 @@ export interface UserProfile {
   address_metadata: Record<string, unknown>;
   vehicle_details: Record<string, unknown>;
   id_document_ufid: string | null;
+  driver_license_ufid: string | null;
   updated_at: string;
 }
 
