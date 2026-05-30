@@ -194,6 +194,20 @@ export class DFSClient {
   }
 
   /**
+   * Build menu image signed URL from restaurant_id + image_ufid.
+   * Uses signed URLs so images work even if the bucket is private.
+   * Returns null if no image_ufid is stored.
+   */
+  async getMenuImageUrl(
+    restaurantId: string,
+    imageUfid: string | null
+  ): Promise<string | null> {
+    if (!imageUfid) return null;
+    const path = buildPath("restaurants", restaurantId, "menu", imageUfid);
+    return this.getUrl(path, 3600); // 1-hour signed URL
+  }
+
+  /**
    * List files in a directory.
    */
   async listFiles(

@@ -15,10 +15,12 @@ import {
   CheckCircle2,
   Edit3,
   Save,
+  AlertTriangle,
 } from "lucide-react";
 import { useSupabase } from "@/lib/supabase/provider";
 import { getRealtimeService } from "@/lib/supabase/realtime-service";
 import { DFSClient } from "@/lib/supabase/dfs-client";
+import { MealCard } from "@/components/shared/MealCard";
 import toast from "react-hot-toast";
 import type { Order, OrderItem, OrderStatus, MenuItem, Restaurant, OrderBroadcastPayload } from "@/types";
 
@@ -56,11 +58,14 @@ export default function RestaurantDashboard() {
   const [restLng, setRestLng] = useState("");
   const [savingInfo, setSavingInfo] = useState(false);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [menuImageUrls, setMenuImageUrls] = useState<Record<string, string | null>>({});
   const [newItem, setNewItem] = useState({ name: "", description: "", price: "" });
   const [menuImage, setMenuImage] = useState<File | null>(null);
+  const [menuImagePreview, setMenuImagePreview] = useState<string | null>(null);
   const [addingItem, setAddingItem] = useState(false);
   const [editingItem, setEditingItem] = useState<string | null>(null);
   const [editPrice, setEditPrice] = useState("");
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   // Load restaurant + orders
   const fetchData = useCallback(async () => {
@@ -96,7 +101,17 @@ export default function RestaurantDashboard() {
         .select("*")
         .eq("restaurant_id", rest.id)
         .order("created_at", { ascending: false });
-      if (items) setMenuItems(items);
+      if (items) {
+        setMenuItems(items);
+        // Resolve signed image URLs for DFS efficiency (Req 10 — client-side cache)
+        const urls: Record<string, string | null> = {};
+        await Promise.all(
+          items.map(async (it) => {
+            urls[it.id] = await dfs.getMenuImageUrl(rest.id, it.image_ufid);
+          })
+        );
+        setMenuImageUrls(urls);
+      }
     }
     setLoading(false);
   }, [supabase, session?.user]);
@@ -235,18 +250,40 @@ export default function RestaurantDashboard() {
     if (error) toast.error(error.message);
     else if (data) {
       setMenuItems((prev) => [data, ...prev]);
+      // Resolve signed image URL for the new item
+      const newUrl = restaurantId ? await dfs.getMenuImageUrl(restaurantId, data.image_ufid) : null;
+      setMenuImageUrls((prev) => ({ ...prev, [data.id]: newUrl }));
       setNewItem({ name: "", description: "", price: "" });
       setMenuImage(null);
+      setMenuImagePreview(null);
       toast.success("تم إضافة الوجبة");
     }
     setAddingItem(false);
   };
 
-  // Delete menu item
+  // Delete menu item (after confirmation)
   const handleDeleteItem = async (id: string) => {
     await supabase.from("menu_items").delete().eq("id", id);
     setMenuItems((prev) => prev.filter((i) => i.id !== id));
+    setMenuImageUrls((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setDeleteConfirmId(null);
     toast.success("تم حذف الوجبة");
+  };
+
+  // File input change with preview
+  const handleMenuImageChange = (file: File | null) => {
+    setMenuImage(file);
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => setMenuImagePreview(reader.result as string);
+      reader.readAsDataURL(file);
+    } else {
+      setMenuImagePreview(null);
+    }
   };
 
   // Update menu item price
@@ -468,79 +505,155 @@ export default function RestaurantDashboard() {
                   </button>
                 </div>
 
-                {/* Menu Manager */}
-                <div className="rounded-xl bg-white p-6 shadow-sm">
-                  <div className="mb-4 flex items-center justify-between">
-                    <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-bold text-green-700">{menuItems.length} وجبة</span>
-                    <h3 className="text-base font-bold text-gray-800">إدارة القائمة</h3>
+                {/* Menu Manager — Modern Grid */}
+                <div className="rounded-2xl bg-white/80 p-6 shadow-sm backdrop-blur-sm dark:bg-gray-800/80">
+                  <div className="mb-6 flex items-center justify-between">
+                    <h3 className="text-lg font-bold text-gray-800 dark:text-gray-100">إدارة القائمة</h3>
+                    <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700">{menuItems.length} وجبة</span>
                   </div>
 
-                  {/* Add new item */}
-                  <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <p className="mb-3 text-sm font-semibold text-gray-700">إضافة وجبة جديدة</p>
+                  {/* Add new item — glass card */}
+                  <div className="mb-8 overflow-hidden rounded-2xl border border-gray-200/60 bg-gradient-to-br from-gray-50 to-white p-5 shadow-sm dark:border-gray-700/60 dark:from-gray-800 dark:to-gray-900">
+                    <p className="mb-4 flex items-center gap-2 text-sm font-bold text-gray-700 dark:text-gray-200">
+                      <Plus size={16} className="text-green-600" />
+                      إضافة وجبة جديدة
+                    </p>
+
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                      <input value={newItem.name} onChange={(e) => setNewItem({ ...newItem, name: e.target.value })} placeholder="اسم الوجبة"
-                        className="rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 outline-none focus:border-green-400" />
-                      <input value={newItem.description} onChange={(e) => setNewItem({ ...newItem, description: e.target.value })} placeholder="وصف (اختياري)"
-                        className="rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 outline-none focus:border-green-400" />
-                      <input type="number" step="0.01" value={newItem.price} onChange={(e) => setNewItem({ ...newItem, price: e.target.value })} placeholder="السعر (ريال)"
-                        className="rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 outline-none focus:border-green-400" />
+                      <input
+                        value={newItem.name}
+                        onChange={(e) => setNewItem({ ...newItem, name: e.target.value })}
+                        placeholder="اسم الوجبة"
+                        className="rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 outline-none transition focus:border-green-400 focus:ring-2 focus:ring-green-100 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:focus:ring-green-900"
+                      />
+                      <input
+                        value={newItem.description}
+                        onChange={(e) => setNewItem({ ...newItem, description: e.target.value })}
+                        placeholder="وصف (اختياري)"
+                        className="rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 outline-none transition focus:border-green-400 focus:ring-2 focus:ring-green-100 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:focus:ring-green-900"
+                      />
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={newItem.price}
+                        onChange={(e) => setNewItem({ ...newItem, price: e.target.value })}
+                        placeholder="السعر (ريال)"
+                        className="rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 outline-none transition focus:border-green-400 focus:ring-2 focus:ring-green-100 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:focus:ring-green-900"
+                      />
                     </div>
-                    <div className="mt-3 flex items-center gap-3">
-                      <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-xs font-medium text-gray-600 hover:bg-gray-50">
-                        <Upload size={13} />
-                        {menuImage ? menuImage.name : "رفع صورة"}
-                        <input type="file" accept="image/*" className="hidden" onChange={(e) => setMenuImage(e.target.files?.[0] ?? null)} />
-                      </label>
-                      <button onClick={handleAddMenuItem} disabled={addingItem}
-                        className="flex items-center gap-1.5 rounded-xl bg-green-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50">
-                        {addingItem ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+
+                    <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-end">
+                      {/* Image upload + live preview */}
+                      <div className="flex flex-1 items-center gap-4">
+                        <label className="flex cursor-pointer items-center gap-2 rounded-xl border-2 border-dashed border-gray-300 bg-white px-5 py-3 text-sm font-medium text-gray-600 transition hover:border-green-400 hover:text-green-600 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300">
+                          <Upload size={16} />
+                          {menuImage ? menuImage.name : "رفع صورة"}
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => handleMenuImageChange(e.target.files?.[0] ?? null)}
+                          />
+                        </label>
+                        {menuImagePreview && (
+                          <div className="relative h-16 w-16 overflow-hidden rounded-xl border border-gray-200 shadow-sm">
+                            <img src={menuImagePreview} alt="معاينة" className="h-full w-full object-cover" />
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={handleAddMenuItem}
+                        disabled={addingItem}
+                        className="flex items-center justify-center gap-2 rounded-xl bg-green-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-green-700 disabled:opacity-50"
+                      >
+                        {addingItem ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
                         إضافة
                       </button>
                     </div>
                   </div>
 
-                  {/* Menu items list */}
+                  {/* Menu items grid */}
                   {menuItems.length === 0 ? (
-                    <div className="py-8 text-center">
-                      <UtensilsCrossed size={36} className="mx-auto mb-2 text-gray-300" />
-                      <p className="text-sm text-gray-400">لا توجد وجبات — أضف وجبتك الأولى</p>
+                    <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-gray-200 py-12 dark:border-gray-700">
+                      <UtensilsCrossed size={40} className="text-gray-300 dark:text-gray-600" />
+                      <p className="text-sm font-medium text-gray-400">لا توجد وجبات — أضف وجبتك الأولى</p>
                     </div>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
                       {menuItems.map((item) => (
-                        <div key={item.id} className="flex items-center gap-3 rounded-xl border border-gray-100 bg-gray-50/50 px-4 py-3 hover:bg-gray-50">
-                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-green-100 text-green-600">
-                            {item.image_ufid ? <ImageIcon size={16} /> : <UtensilsCrossed size={16} />}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-semibold text-gray-800">{item.name}</p>
-                            {item.description && <p className="text-xs text-gray-500">{item.description}</p>}
-                          </div>
-
-                          {editingItem === item.id ? (
-                            <div className="flex items-center gap-1.5">
-                              <input type="number" step="0.01" value={editPrice} onChange={(e) => setEditPrice(e.target.value)}
-                                className="w-20 rounded-lg border border-green-300 px-2 py-1 text-sm text-gray-800 outline-none"
-                                autoFocus onKeyDown={(e) => e.key === "Enter" && handleUpdatePrice(item.id)} />
-                              <button onClick={() => handleUpdatePrice(item.id)} className="text-green-600 hover:text-green-700"><CheckCircle2 size={16} /></button>
-                              <button onClick={() => setEditingItem(null)} className="text-gray-400 hover:text-gray-600"><X size={16} /></button>
-                            </div>
-                          ) : (
-                            <button onClick={() => { setEditingItem(item.id); setEditPrice(Number(item.price).toString()); }}
-                              className="flex items-center gap-1 text-sm font-bold text-green-600 hover:text-green-700">
-                              {Number(item.price).toFixed(2)} ريال <Edit3 size={12} />
-                            </button>
-                          )}
-
-                          <button onClick={() => handleDeleteItem(item.id)} className="rounded-lg p-1.5 text-red-400 hover:bg-red-50 hover:text-red-600">
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
+                        <MealCard
+                          key={item.id}
+                          item={item}
+                          imageUrl={menuImageUrls[item.id] ?? null}
+                          variant="restaurant"
+                          onEdit={() => { setEditingItem(item.id); setEditPrice(Number(item.price).toString()); }}
+                          onDelete={() => setDeleteConfirmId(item.id)}
+                        />
                       ))}
                     </div>
                   )}
                 </div>
+
+                {/* Edit price inline */}
+                {editingItem && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+                    <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl dark:bg-gray-800">
+                      <h4 className="mb-4 text-base font-bold text-gray-800 dark:text-gray-100">تعديل السعر</h4>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={editPrice}
+                        onChange={(e) => setEditPrice(e.target.value)}
+                        autoFocus
+                        onKeyDown={(e) => e.key === "Enter" && editingItem && handleUpdatePrice(editingItem)}
+                        className="mb-4 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-lg font-bold text-gray-800 outline-none focus:border-green-400 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => editingItem && handleUpdatePrice(editingItem)}
+                          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-green-600 py-2.5 text-sm font-bold text-white hover:bg-green-700"
+                        >
+                          <Save size={14} /> حفظ
+                        </button>
+                        <button
+                          onClick={() => setEditingItem(null)}
+                          className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white py-2.5 text-sm font-bold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                        >
+                          إلغاء
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Delete confirmation modal */}
+                {deleteConfirmId && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+                    <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl dark:bg-gray-800">
+                      <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-100 text-red-600">
+                        <AlertTriangle size={24} />
+                      </div>
+                      <h4 className="mb-2 text-base font-bold text-gray-800 dark:text-gray-100">تأكيد الحذف</h4>
+                      <p className="mb-6 text-sm text-gray-500 dark:text-gray-400">
+                        هل أنت متأكد من حذف هذه الوجبة؟ لا يمكن التراجع عن هذا الإجراء.
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => deleteConfirmId && handleDeleteItem(deleteConfirmId)}
+                          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-red-600 py-2.5 text-sm font-bold text-white hover:bg-red-700"
+                        >
+                          <Trash2 size={14} /> نعم، احذف
+                        </button>
+                        <button
+                          onClick={() => setDeleteConfirmId(null)}
+                          className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white py-2.5 text-sm font-bold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                        >
+                          إلغاء
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </>

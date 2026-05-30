@@ -908,3 +908,43 @@ NEXT_PUBLIC_APP_URL=https://localhost:3000
 #### 3. Vercel Production Webhook
 - Stripe webhook endpoint registered in Stripe Dashboard → `https://delivery-system-wheat.vercel.app/api/webhooks/stripe`
 - No longer needs `stripe listen` for production
+
+### [2026-05-30] — DFS Image Fix & Premium UI/UX Overhaul
+
+#### 1. DFS Image Rendering Fix
+- **File**: `src/lib/supabase/dfs-client.ts`
+- Added `getMenuImageUrl(restaurantId, imageUfid)` helper that builds the full hierarchical path (`restaurants/{id}/menu/{ufid}`) and returns a public URL via `getPublicUrl()`
+- **File**: `next.config.ts`
+- Added Supabase Storage domain to `images.remotePatterns` for `next/image` optimization
+- Client and Restaurant dashboards now resolve `image_ufid` → public URL on menu load, leveraging client-side cache (Req 10)
+
+#### 2. Shared MealCard Component
+- **File**: `src/components/shared/MealCard.tsx`
+- New premium card component with:
+  - `next/image` integration with `aspect-[4/3]`, `object-cover`, lazy loading
+  - Loading skeleton (shimmer effect) while image loads
+  - Hover zoom effect on image, shadow transitions
+  - Price badge overlay on image
+  - Two variants: `"client"` (add to cart / quantity controls) and `"restaurant"` (edit / delete)
+  - Fallback placeholder when no image exists
+
+#### 3. Restaurant Menu Management Redesign
+- **File**: `src/app/dashboard/restaurant/page.tsx`
+- Replaced simple list with responsive `MealCard` grid (`sm:grid-cols-2 lg:grid-cols-3`)
+- Added live image preview during upload (FileReader → base64 preview)
+- Added glassmorphism card style for the "Add new item" form
+- Added confirmation modal for delete action (with `AlertTriangle` icon)
+- Added centered modal for price editing with save/cancel
+- Real-time image URL cache (`menuImageUrls` state) synced on CRUD
+
+#### 4. Client Menu Browsing Redesign
+- **File**: `src/app/dashboard/client/page.tsx`
+- Added vibrant restaurant header banner with gradient (`orange → amber → yellow`), cuisine type badge, star rating, and decorative circles
+- Replaced plain text cards with `MealCard` grid showing food images
+- Added skeleton loading grid during menu fetch
+- Shows item count and cart quantity controls inline on each card
+
+#### 5. Distributed Concepts Implemented
+- **Efficiency (Req 3)**: `next/image` automatic optimization, lazy loading, and responsive `sizes` attribute minimize network overhead
+- **Caching (Req 10)**: DFS client-side cache (`localStorage`) stores resolved image URLs with 5-minute TTL; URLs are reused across page navigations
+- **Transparency (Req 2)**: Image loading skeletons provide visual feedback during latency
