@@ -1248,3 +1248,27 @@ NEXT_PUBLIC_APP_URL=https://localhost:3000
 - **Fault Tolerance (Lecture 3, Slide 30)**: GPS failure → DB fallback → hardcoded fallback (3-layer resilience)
 - **Peer Visibility**: Multi-modal alerting (UI card + browser notification + sound) ensures no missed emergency
 - **State Consistency**: `setHelpRequests` updates trigger UI re-render even if peer list is filtered
+
+### [2026-06-01] — Unified Restaurant Location Picker
+
+#### 1. Problem
+- Restaurant dashboard settings used manual `latitude` / `longitude` input fields
+- Prone to human error, poor UX, no visual confirmation of location
+
+#### 2. Solution
+- **File**: `src/app/dashboard/restaurant/page.tsx`
+- Replaced manual lat/lng inputs with interactive `LocationPicker` component (dynamic import, SSR-safe)
+- Map initializes with restaurant's **current saved coordinates** from DB
+- Clicking on map or dragging marker updates `restLat` / `restLng` state
+- **"حفظ البيانات"** persists new coordinates to `restaurants` table via existing `handleSaveInfo`
+- Added "موقعي الحالي" button for quick GPS-based location
+
+#### 3. Styling
+- Map container: `rounded-xl`, `border`, dark mode support via `dark:border-gray-700`
+- Height: `280px` for balanced visibility
+- Full-width (`sm:col-span-2`) spanning both columns
+
+#### 4. UI/UX Concept
+- Unified location management: all restaurant location updates now use the interactive `LocationPicker`
+- Better accuracy (click on map vs typing numbers)
+- Consistent with initial setup experience

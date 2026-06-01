@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { DashboardShell } from "@/components/shared/DashboardShell";
 import {
   Package,
@@ -16,6 +17,7 @@ import {
   Edit3,
   Save,
   AlertTriangle,
+  MapPin,
 } from "lucide-react";
 import { useSupabase } from "@/lib/supabase/provider";
 import { getRealtimeService } from "@/lib/supabase/realtime-service";
@@ -23,6 +25,11 @@ import { DFSClient } from "@/lib/supabase/dfs-client";
 import { MealCard } from "@/components/shared/MealCard";
 import toast from "react-hot-toast";
 import type { Order, OrderItem, OrderStatus, MenuItem, Restaurant, OrderBroadcastPayload } from "@/types";
+
+const LocationPicker = dynamic(
+  () => import("@/components/shared/LocationPicker").then((m) => m.LocationPicker),
+  { ssr: false }
+);
 
 const STATUS_LABELS: Record<string, string> = {
   pending: "جديد", accepted: "مقبول", preparing: "جاري التحضير",
@@ -482,15 +489,20 @@ export default function RestaurantDashboard() {
                       <input value={restCuisine} onChange={(e) => setRestCuisine(e.target.value)} placeholder="عربي، إيطالي..."
                         className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-800 outline-none focus:border-green-400 focus:bg-white" />
                     </div>
-                    <div>
-                      <label className="mb-1.5 block text-xs font-semibold text-gray-600">خط العرض</label>
-                      <input type="number" step="any" value={restLat} onChange={(e) => setRestLat(e.target.value)}
-                        className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-800 outline-none focus:border-green-400 focus:bg-white" />
-                    </div>
-                    <div>
-                      <label className="mb-1.5 block text-xs font-semibold text-gray-600">خط الطول</label>
-                      <input type="number" step="any" value={restLng} onChange={(e) => setRestLng(e.target.value)}
-                        className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-800 outline-none focus:border-green-400 focus:bg-white" />
+                    <div className="sm:col-span-2">
+                      <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-gray-600">
+                        <MapPin size={12} />
+                        موقع المطعم على الخريطة
+                      </label>
+                      <LocationPicker
+                        initialLat={parseFloat(restLat) || 24.7136}
+                        initialLng={parseFloat(restLng) || 46.6753}
+                        onLocationChange={(lat, lng) => {
+                          setRestLat(lat.toString());
+                          setRestLng(lng.toString());
+                        }}
+                        height="280px"
+                      />
                     </div>
                     <div className="sm:col-span-2">
                       <label className="mb-1.5 block text-xs font-semibold text-gray-600">وصف المطعم</label>
