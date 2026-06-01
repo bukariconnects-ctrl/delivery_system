@@ -1144,3 +1144,107 @@ NEXT_PUBLIC_APP_URL=https://localhost:3000
 - **P2P Resource Sharing (Req 8)**: No database queries — discovery is pure WebSocket broadcast via Supabase Realtime
 - **DHT Edge Cache**: Each driver maintains their own local view of the mesh, reducing central hub load
 - **Transparency (Req 2)**: Users see peers appear/disappear in real-time without manual refresh
+
+### [2026-06-01] — P2P Emergency Coordination (Req 8 + Req 3)
+
+#### 1. Migration: `supabase/migrations/0013_p2p_transfer_rpc.sql`
+- **Table**: `order_transfers` — auditable log of all P2P ownership transfers
+- **RLS**: Admins read all, drivers read their own
+- **RPC**: `transfer_order_ownership(p_order_id, p_new_driver_id)`
+  - `SECURITY DEFINER` — bypasses RLS for atomic update
+  - Validates order is `picked_up` or `in_transit`
+  - Prevents self-transfer
+  - Atomically updates `orders.driver_id` + logs transfer
+
+#### 2. Driver Page: Help Request Button
+- **File**: `src/app/dashboard/driver/page.tsx`
+- Added **"طلب مساعدة من السائقين"** button with `LifeBuoy` icon on `in_transit` orders
+- Calls `navigator.geolocation.getCurrentPosition` then `p2p.sendHelpRequest(orderId, lat, lng)`
+- Broadcasts `HELP_REQUEST` event on `p2p-mesh` channel via `sendBroadcast`
+
+#### 3. NearbyPeers: Emergency Card UI
+- **File**: `src/components/driver/NearbyPeers.tsx`
+- Refactored to accept hook data as props (presentational component)
+- Added **Emergency Help Request Cards** section with red styling
+- Shows: driver name, order ID, location coordinates
+- **"استلام الشحنة من الزميل"** button calls `transfer_order_ownership` RPC
+- Dismiss (X) button removes the request from local state
+
+#### 4. Hook Enhancement
+- **File**: `src/hooks/use-p2p-discovery.ts`
+- Added `HelpRequestPayload` interface
+- Subscribed to `help_request` event on `p2p-mesh` channel
+- `helpRequests` state deduplicates by `orderId`
+- Added `sendHelpRequest` and `dismissHelpRequest` callbacks
+
+#### 5. Distributed Concepts
+- **Fault Tolerance (Req 3, Lecture 3 Slide 30)**: Node failure → task redistributed to healthy peer without admin intervention
+- **Dynamic Autonomy**: Drivers coordinate directly without waiting for admin
+- **P2P Coordination (Req 8)**: Pure broadcast — no database queries for discovery
+
+### [2026-06-01] — P2P Help Request Emergency UI Fix
+
+#### 1. Problem
+- Driver 1 broadcasts `HELP_REQUEST` successfully (toast confirms)
+- Driver 2/3 receive the broadcast in `useP2PDiscovery` hook (WebSocket works)
+- But Emergency Card was buried inside `NearbyPeers` component — not prominent enough
+
+#### 2. Solution
+- **Prominent Emergency Cards** at the top of "طلبات جاهزة للاستملام" section
+- **File**: `src/app/dashboard/driver/page.tsx`
+- Cards show: colleague name, restaurant name, order ID, total amount, item count
+- Badge: "قريب منك" with green styling
+- Button: **"استلام الطلب وإكمال التوصيل"** calls `transfer_order_ownership` RPC
+- On success: card dismissed + `fetchData()` refreshes driver's active orders instantly
+
+#### 3. Payload Enrichment
+- **File**: `src/hooks/use-p2p-discovery.ts`
+- `HelpRequestPayload` now includes `orderMeta: { restaurantName, totalAmount, itemCount, status }`
+- Peer driver knows exactly what they're accepting without extra DB fetch
+
+#### 4. Space Uncoupling (Lecture 1, Slide 11)
+- Peer drivers listen to `p2p-mesh` topic — they don't need sender's ID beforehand
+- Broadcast is topic-based, not point-to-point
+
+#### 5. Fault Tolerance — Instant Client Update
+- `driver/page.tsx` already subscribes to `orders` table changes via `subscribeTable`
+- When `transfer_order_ownership` updates `orders.driver_id`, all subscribers auto-refresh
+- Client sees new driver instantly; old driver sees order removed from active list
+
+### [2026-06-01] — P2P Help Request Robustness & Visibility Fixes
+
+#### 1. Problem
+- Driver 1 broadcasts `HELP_REQUEST`, but peers **drop the message** due to "Out-of-order" sequence logic
+- Geolocation errors prevent accurate coordinate broadcasting
+- Peer drivers don't get notified when a help request arrives
+
+#### 2. Message Ordering Robustness
+- **File**: `src/lib/supabase/realtime-service.ts`
+- **Emergency Bypass**: `HELP_REQUEST` (type === `"help_request"`) bypasses the `SequenceTracker` check entirely — SOS signals must never be dropped
+- **Gap Reset**: `SequenceTracker.check()` now detects significant gaps (`> GAP_THRESHOLD = 10`) and resets the sender instead of dropping packets (Lecture 4, Slide 11 — Handling Failures)
+- Updated both `subscribeBroadcast` and `subscribeSharedBroadcast` to use the new logic
+
+#### 3. Geolocation Fallback (Edge Node Fault Tolerance)
+- **File**: `src/app/dashboard/driver/page.tsx`
+- If `navigator.geolocation` fails, fetch last known location from `driver_locations` table (`current_latitude`, `current_longitude`)
+- If DB also returns nothing, fallback to Riyadh coordinates (`24.71, 46.68`)
+- **Distributed Concept**: Edge node GPS failure → system recovers via cached state in DB (Lecture 3, Slide 30)
+
+#### 4. Priority Flag & Payload
+- **File**: `src/hooks/use-p2p-discovery.ts`
+- `HelpRequestPayload` now includes `priority: "high"` — future consumers can sort/filter by priority
+- `timestamp` is always ISO string from sender
+
+#### 5. Peer Visibility — Browser Notification + Sound Alert
+- **File**: `src/hooks/use-p2p-discovery.ts`
+- When `HELP_REQUEST` received:
+  - Shows **browser Notification** (`طلب مساعدة طارئ!`) with driver name, order ID, restaurant name
+  - Requests permission if not already granted
+  - Plays **soft beep** (880Hz, 150ms) via Web Audio API so driver notices even if tab is not focused
+- **State update**: `setHelpRequests` triggers regardless of UI filters — card always renders at top of available orders
+
+#### 6. Distributed Concepts
+- **Message Ordering (Lecture 4, Slide 11)**: Emergency signals bypass sequence checks — correctness trade-off for availability
+- **Fault Tolerance (Lecture 3, Slide 30)**: GPS failure → DB fallback → hardcoded fallback (3-layer resilience)
+- **Peer Visibility**: Multi-modal alerting (UI card + browser notification + sound) ensures no missed emergency
+- **State Consistency**: `setHelpRequests` updates trigger UI re-render even if peer list is filtered

@@ -44,15 +44,29 @@ type ChangeHandler<T extends { [key: string]: unknown } = Record<string, unknown
 
 // ---- Sequence tracker (per sender) ----
 
+const GAP_THRESHOLD = 10; // Reset tracker if gap exceeds this (Lecture 4, Slide 11)
+
 class SequenceTracker {
   private lastSeq = new Map<string, number>();
 
-  /** Returns true if the message is in order; false if stale / duplicate */
-  check(senderId: string, seq: number): boolean {
+  /** Returns true if the message is in order; false if stale / duplicate.
+   *  If a significant gap is detected, resets the sender and allows the message. */
+  check(senderId: string, seq: number): { ok: boolean; reset: boolean } {
     const prev = this.lastSeq.get(senderId) ?? -1;
-    if (seq <= prev) return false; // duplicate or out-of-order
+    if (seq <= prev) {
+      return { ok: false, reset: false }; // duplicate or out-of-order
+    }
+    // Significant gap detected → reset to recover from packet loss / restart
+    if (prev !== -1 && seq - prev > GAP_THRESHOLD) {
+      this.lastSeq.set(senderId, seq);
+      return { ok: true, reset: true };
+    }
     this.lastSeq.set(senderId, seq);
-    return true;
+    return { ok: true, reset: false };
+  }
+
+  resetSender(senderId: string) {
+    this.lastSeq.delete(senderId);
   }
 
   reset() {
@@ -67,6 +81,7 @@ export class RealtimeService {
   private sequenceTracker = new SequenceTracker();
   private localSeq = 0; // monotonic counter for outgoing messages
   private subscribedChannels = new Set<string>(); // tracks already-subscribed exact-name channels
+  private channelListeners = new Set<string>(); // tracks "channelName:event" pairs to avoid duplicate listeners
   private channelStatus = new Map<string, "pending" | "subscribed" | "error" | "closed">();
   private pendingResolvers = new Map<string, (() => void)[]>();
 
@@ -134,6 +149,7 @@ export class RealtimeService {
     }
     this.sequenceTracker.reset();
     this.subscribedChannels.clear();
+    this.channelListeners.clear();
   }
 
   // ------------------------------------------------
@@ -155,12 +171,22 @@ export class RealtimeService {
     ch.on("broadcast", { event }, ({ payload }) => {
       const msg = payload as SequencedMessage<T>;
 
-      // Sender-order check (Lecture 4, Slide 11)
-      if (!this.sequenceTracker.check(msg.senderId, msg.seq)) {
-        console.warn(
-          `[RealtimeService] Out-of-order message dropped: sender=${msg.senderId} seq=${msg.seq}`
-        );
-        return;
+      // Emergency messages bypass sequence check — must never drop SOS signals
+      const isEmergency = msg.type === "help_request" || (msg.payload as { type?: string })?.type === "HELP_REQUEST";
+
+      if (!isEmergency) {
+        const result = this.sequenceTracker.check(msg.senderId, msg.seq);
+        if (!result.ok) {
+          console.warn(
+            `[RealtimeService] Out-of-order message dropped: sender=${msg.senderId} seq=${msg.seq}`
+          );
+          return;
+        }
+        if (result.reset) {
+          console.warn(
+            `[RealtimeService] Sequence gap reset for sender=${msg.senderId} seq=${msg.seq}`
+          );
+        }
       }
 
       handler(msg);
@@ -181,24 +207,39 @@ export class RealtimeService {
     handler: MessageHandler<T>
   ): RealtimeChannel {
     const ch = this.getChannel(channelName);
+    const listenerKey = `${channelName}:${event}`;
 
-    if (!this.subscribedChannels.has(channelName)) {
-      // Attach listener + subscribe atomically so Strict Mode re-mounts
-      // don't duplicate handlers or re-call subscribe on the same instance.
+    // Attach listener per (channelName, event) pair so multiple events on
+    // the same channel all get handlers (e.g. announce + help_request on p2p-mesh)
+    if (!this.channelListeners.has(listenerKey)) {
       ch.on("broadcast", { event }, ({ payload }) => {
         const msg = payload as SequencedMessage<T>;
 
-        // Sender-order check (Lecture 4, Slide 11)
-        if (!this.sequenceTracker.check(msg.senderId, msg.seq)) {
-          console.warn(
-            `[RealtimeService] Out-of-order message dropped: sender=${msg.senderId} seq=${msg.seq}`
-          );
-          return;
+        // Emergency messages bypass sequence check — must never drop SOS signals
+        const isEmergency = msg.type === "help_request" || (msg.payload as { type?: string })?.type === "HELP_REQUEST";
+
+        if (!isEmergency) {
+          const result = this.sequenceTracker.check(msg.senderId, msg.seq);
+          if (!result.ok) {
+            console.warn(
+              `[RealtimeService] Out-of-order message dropped: sender=${msg.senderId} seq=${msg.seq}`
+            );
+            return;
+          }
+          if (result.reset) {
+            console.warn(
+              `[RealtimeService] Sequence gap reset for sender=${msg.senderId} seq=${msg.seq}`
+            );
+          }
         }
 
         handler(msg);
       });
+      this.channelListeners.add(listenerKey);
+    }
 
+    // Subscribe the channel only once
+    if (!this.subscribedChannels.has(channelName)) {
       this.channelStatus.set(channelName, "pending");
       ch.subscribe((status) => {
         if (status === "SUBSCRIBED") {
@@ -211,6 +252,7 @@ export class RealtimeService {
         } else if (status === "CLOSED") {
           this.channelStatus.set(channelName, "closed");
           this.subscribedChannels.delete(channelName);
+          this.channelListeners.delete(listenerKey);
         }
       });
       this.subscribedChannels.add(channelName);

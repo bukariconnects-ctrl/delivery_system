@@ -10,10 +10,12 @@ import {
   CheckCircle2,
   UtensilsCrossed,
   MapPin,
+  LifeBuoy,
 } from "lucide-react";
 import { useSupabase } from "@/lib/supabase/provider";
 import { getRealtimeService } from "@/lib/supabase/realtime-service";
 import { useAcceptOrder } from "@/hooks/use-remote-actions";
+import { useP2PDiscovery } from "@/hooks/use-p2p-discovery";
 import { NearbyPeers } from "@/components/driver/NearbyPeers";
 import toast from "react-hot-toast";
 import type { Order, OrderItem, OrderStatus, Restaurant, OrderBroadcastPayload } from "@/types";
@@ -46,6 +48,14 @@ export default function DriverDashboard() {
   const [trackingOrderId, setTrackingOrderId] = useState<string | null>(null);
 
   const { acceptOrder, accepting } = useAcceptOrder();
+
+  const driverName = session?.user?.email?.split("@")[0] ?? "Driver";
+  const p2p = useP2PDiscovery({
+    role: "driver",
+    displayName: driverName,
+    autoAnnounce: true,
+    enabled: isOnline,
+  });
 
   // Fetch data
   const fetchData = useCallback(async () => {
@@ -171,7 +181,7 @@ export default function DriverDashboard() {
               updated_at: new Date().toISOString(),
             });
         },
-        (err) => console.error("Geolocation error:", err),
+        () => { /* GPS unavailable — location update skipped silently */ },
         { enableHighAccuracy: true, timeout: 5000 }
       );
     }, 3000);
@@ -187,6 +197,38 @@ export default function DriverDashboard() {
       setTrackingOrderId(orderId);
       toast.success("تم بدء تتبع الموقع — يتم الإرسال كل 3 ثوانٍ");
     }
+  };
+
+  // P2P Emergency: broadcast HELP_REQUEST to peers
+  const handleRequestHelp = async (order: Order) => {
+    const restaurant = restaurants.get(order.restaurant_id);
+    const items = (order.items ?? []) as OrderItem[];
+    const orderMeta = {
+      restaurantName: restaurant?.name ?? "مطعم غير معروف",
+      totalAmount: Number(order.total_amount),
+      itemCount: items.reduce((sum, it) => sum + it.quantity, 0),
+      status: order.status,
+    };
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        await p2p.sendHelpRequest(order.id, latitude, longitude, orderMeta);
+        toast.success("تم إرسال طلب المساعدة لجميع السائقين القريبين");
+      },
+      async (err) => {
+        console.error("Geolocation error:", err);
+        // Fallback: fetch last known location from driver_locations table
+        const { data: loc } = await supabase
+          .from("driver_locations")
+          .select("current_latitude, current_longitude")
+          .eq("driver_id", session?.user?.id)
+          .single();
+        const lat = loc?.current_latitude ?? 24.71;
+        const lng = loc?.current_longitude ?? 46.68;
+        await p2p.sendHelpRequest(order.id, lat, lng, orderMeta);
+        toast.success("تم إرسال طلب المساعدة (موقع آخر معروف)");
+      }
+    );
   };
 
   // Update order status
@@ -240,7 +282,15 @@ export default function DriverDashboard() {
         {/* P2P Mesh Discovery — Nearby Peers */}
         {isOnline && (
           <div className="mb-6">
-            <NearbyPeers displayName={session?.user?.email?.split("@")[0] ?? "Driver"} isOnline={isOnline} />
+            <NearbyPeers
+              peers={p2p.peers}
+              meshSize={p2p.meshSize}
+              myLocation={p2p.myLocation}
+              connectionStatus={p2p.connectionStatus}
+              helpRequests={p2p.helpRequests}
+              refreshPeers={p2p.refreshPeers}
+              dismissHelpRequest={p2p.dismissHelpRequest}
+            />
           </div>
         )}
 
@@ -254,6 +304,76 @@ export default function DriverDashboard() {
             {/* Available Orders */}
             <div>
               <h3 className="mb-4 text-lg font-bold text-gray-800 dark:text-gray-100">طلبات جاهزة للاستلام ({availableOrders.length})</h3>
+
+              {/* P2P Emergency Help Requests — rendered prominently at top */}
+              {p2p.helpRequests.length > 0 && (
+                <div className="mb-5 space-y-3">
+                  {p2p.helpRequests.map((req) => (
+                    <div
+                      key={req.orderId}
+                      className="relative rounded-xl border border-orange-300 bg-orange-50 p-4 shadow-sm dark:border-orange-900 dark:bg-orange-900/10"
+                    >
+                      <div className="mb-2 flex items-center gap-2">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-orange-100 text-orange-600 dark:bg-orange-900/30">
+                          ⚠️
+                        </span>
+                        <div>
+                          <p className="text-sm font-bold text-gray-800 dark:text-gray-100">
+                            طلب مساعدة طارئ من زميل
+                          </p>
+                          <p className="text-[10px] text-gray-500">
+                            {req.driverName} — {new Date(req.timestamp).toLocaleTimeString("ar-SA")}
+                          </p>
+                        </div>
+                        <span className="mr-auto rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-bold text-green-700 dark:bg-green-900/30">
+                          قريب منك
+                        </span>
+                      </div>
+                      <div className="mb-3 rounded-lg bg-white p-2.5 dark:bg-gray-800">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-gray-700 dark:text-gray-300">
+                            {req.orderMeta.restaurantName}
+                          </span>
+                          <span className="font-mono text-[10px] text-gray-400">
+                            #{req.orderId.slice(0, 7)}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex items-center gap-3 text-[10px] text-gray-500">
+                          <span>💰 {req.orderMeta.totalAmount.toFixed(2)} ريال</span>
+                          <span>📦 {req.orderMeta.itemCount} قطعة</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          setUpdatingId(req.orderId);
+                          const { data, error } = await supabase.rpc("transfer_order_ownership", {
+                            p_order_id: req.orderId,
+                            p_new_driver_id: session?.user?.id,
+                          });
+                          if (error) {
+                            toast.error(`فشل الاستلام: ${error.message}`);
+                          } else if (data && !data.success) {
+                            toast.error(`فشل الاستلام: ${data.error}`);
+                          } else {
+                            toast.success("تم استلام الطلب وإكمال التوصيل بنجاح");
+                            p2p.dismissHelpRequest(req.orderId);
+                            fetchData();
+                          }
+                          setUpdatingId(null);
+                        }}
+                        disabled={updatingId === req.orderId}
+                        className="flex w-full items-center justify-center gap-2 rounded-xl bg-orange-600 py-2.5 text-xs font-bold text-white hover:bg-orange-700 disabled:opacity-50"
+                      >
+                        {updatingId === req.orderId ? (
+                          <><Loader2 size={12} className="animate-spin" /> جاري الاستلام...</>
+                        ) : (
+                          <><CheckCircle2 size={12} /> استلام الطلب وإكمال التوصيل</>
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {!isOnline ? (
                 <div className="flex flex-col items-center gap-3 rounded-xl bg-white py-12 shadow-sm dark:bg-gray-800">
@@ -383,20 +503,30 @@ export default function DriverDashboard() {
                         )}
                         
                         {order.status === "in_transit" && (
-                          <button
-                            onClick={() => toggleTracking(order.id)}
-                            className={`mb-3 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-bold text-white transition-colors ${
-                              trackingOrderId === order.id
-                                ? "bg-red-600 hover:bg-red-700"
-                                : "bg-orange-500 hover:bg-orange-600"
-                            }`}
-                          >
-                            {trackingOrderId === order.id ? (
-                              <><Loader2 size={14} className="animate-spin" /> إيقاف التتبع</>
-                            ) : (
-                              <><Truck size={14} /> بدء التتبع المباشر</>
-                            )}
-                          </button>
+                          <>
+                            <button
+                              onClick={() => toggleTracking(order.id)}
+                              className={`mb-3 flex w-full items-center justify-center gap-2 rounded-xl py-3 text-sm font-bold text-white transition-colors ${
+                                trackingOrderId === order.id
+                                  ? "bg-red-600 hover:bg-red-700"
+                                  : "bg-orange-500 hover:bg-orange-600"
+                              }`}
+                            >
+                              {trackingOrderId === order.id ? (
+                                <><Loader2 size={14} className="animate-spin" /> إيقاف التتبع</>
+                              ) : (
+                                <><Truck size={14} /> بدء التتبع المباشر</>
+                              )}
+                            </button>
+                            {/* P2P Emergency Help Request */}
+                            <button
+                              onClick={() => handleRequestHelp(order)}
+                              className="mb-3 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-red-300 bg-red-50 py-3 text-sm font-bold text-red-700 transition-colors hover:bg-red-100 dark:border-red-900 dark:bg-red-900/20 dark:text-red-300 dark:hover:bg-red-900/30"
+                            >
+                              <LifeBuoy size={14} />
+                              طلب مساعدة من السائقين
+                            </button>
+                          </>
                         )}
                         {nextAction && (
                           <button onClick={() => handleUpdateStatus(order.id, nextAction.next)} disabled={updatingId === order.id}

@@ -1,22 +1,32 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useP2PDiscovery } from "@/hooks/use-p2p-discovery";
-import { Radio, Wifi, WifiOff, RefreshCw, Users, Signal, SignalZero } from "lucide-react";
+import { useSupabase } from "@/lib/supabase/provider";
+import type { PeerNode } from "@/lib/supabase/p2p-cache";
+import type { HelpRequestPayload } from "@/hooks/use-p2p-discovery";
+import { Radio, Wifi, WifiOff, RefreshCw, Users, Signal, SignalZero, LifeBuoy, MapPin, AlertTriangle, CheckCircle2, X } from "lucide-react";
+import toast from "react-hot-toast";
 
 interface NearbyPeersProps {
-  displayName: string;
-  isOnline?: boolean;
+  peers: PeerNode[];
+  meshSize: number;
+  myLocation: { lat: number; lng: number };
+  connectionStatus: "pending" | "subscribed" | "error" | "closed";
+  helpRequests: HelpRequestPayload[];
+  refreshPeers: () => void;
+  dismissHelpRequest: (orderId: string) => void;
 }
 
-export function NearbyPeers({ displayName, isOnline }: NearbyPeersProps) {
-  const { peers, meshSize, myLocation, getNearbyDrivers, refreshPeers, connectionStatus } =
-    useP2PDiscovery({ role: "driver", displayName, autoAnnounce: true, enabled: isOnline });
-
+export function NearbyPeers({
+  peers, meshSize, myLocation, connectionStatus,
+  helpRequests, refreshPeers, dismissHelpRequest,
+}: NearbyPeersProps) {
+  const { supabase } = useSupabase();
   const [scanning, setScanning] = useState(true);
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
 
   // Compute nearby drivers using DHT cache distance logic
-  const nearbyDrivers = getNearbyDrivers(myLocation.lat, myLocation.lng, 10);
+  const nearbyDrivers = peers.filter((p) => p.role === "driver").slice(0, 10);
 
   // Auto-stop scanning animation after a bit
   useEffect(() => {
@@ -28,6 +38,24 @@ export function NearbyPeers({ displayName, isOnline }: NearbyPeersProps) {
     setScanning(true);
     refreshPeers();
     setTimeout(() => setScanning(false), 2000);
+  };
+
+  const handleTakeOver = async (req: HelpRequestPayload) => {
+    if (!supabase) return;
+    setAcceptingId(req.orderId);
+    const { data, error } = await supabase.rpc("transfer_order_ownership", {
+      p_order_id: req.orderId,
+      p_new_driver_id: (await supabase.auth.getUser()).data.user?.id,
+    });
+    if (error) {
+      toast.error(`فشل الاستلام: ${error.message}`);
+    } else if (data && !data.success) {
+      toast.error(`فشل الاستلام: ${data.error}`);
+    } else {
+      toast.success("تم استلام الطلب بنجاح من الزميل");
+      dismissHelpRequest(req.orderId);
+    }
+    setAcceptingId(null);
   };
 
   return (
@@ -167,6 +195,57 @@ export function NearbyPeers({ displayName, isOnline }: NearbyPeersProps) {
           ))
         )}
       </div>
+
+      {/* Emergency Help Requests */}
+      {helpRequests.length > 0 && (
+        <div className="mt-5 space-y-3">
+          <div className="flex items-center gap-1.5">
+            <AlertTriangle size={14} className="text-red-500" />
+            <h4 className="text-xs font-bold text-red-600 dark:text-red-400">
+              طلبات مساعدة طارئة ({helpRequests.length})
+            </h4>
+          </div>
+          {helpRequests.map((req) => (
+            <div
+              key={req.orderId}
+              className="relative rounded-xl border border-red-200 bg-red-50 p-4 dark:border-red-900/50 dark:bg-red-900/10"
+            >
+              <button
+                onClick={() => dismissHelpRequest(req.orderId)}
+                className="absolute left-2 top-2 rounded-md p-1 text-gray-400 hover:bg-red-100 hover:text-red-600 dark:hover:bg-red-900/30"
+              >
+                <X size={12} />
+              </button>
+              <div className="mb-2 flex items-center gap-2">
+                <LifeBuoy size={16} className="text-red-500" />
+                <div>
+                  <p className="text-xs font-bold text-gray-800 dark:text-gray-200">
+                    سائق يحتاج مساعدة!
+                  </p>
+                  <p className="text-[10px] text-gray-500">
+                    {req.driverName} — طلب #{req.orderId.slice(0, 7)}
+                  </p>
+                </div>
+              </div>
+              <div className="mb-3 flex items-center gap-1 text-[10px] text-gray-500">
+                <MapPin size={10} />
+                <span>Lat: {req.latitude.toFixed(4)}, Lng: {req.longitude.toFixed(4)}</span>
+              </div>
+              <button
+                onClick={() => handleTakeOver(req)}
+                disabled={acceptingId === req.orderId}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-red-600 py-2.5 text-xs font-bold text-white hover:bg-red-700 disabled:opacity-50"
+              >
+                {acceptingId === req.orderId ? (
+                  <><RefreshCw size={12} className="animate-spin" /> جاري الاستلام...</>
+                ) : (
+                  <><CheckCircle2 size={12} /> استلام الشحنة من الزميل</>
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Footer */}
       <div className="mt-3 text-center">

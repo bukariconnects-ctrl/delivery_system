@@ -29,6 +29,7 @@ import { getP2PCache, type PeerNode } from "@/lib/supabase/p2p-cache";
 
 const P2P_CHANNEL = "p2p-mesh";
 const ANNOUNCE_EVENT = "announce";
+const HELP_REQUEST_EVENT = "help_request";
 const ANNOUNCE_INTERVAL_MS = 5_000; // every 5s for faster testing
 
 /** Payload broadcast when a node announces itself */
@@ -39,6 +40,25 @@ export interface AnnouncePayload {
   latitude: number;
   longitude: number;
   isOnline: boolean;
+}
+
+/** Payload broadcast when a driver needs emergency help */
+export interface HelpRequestPayload {
+  type: "HELP_REQUEST";
+  orderId: string;
+  driverId: string;
+  driverName: string;
+  latitude: number;
+  longitude: number;
+  timestamp: string;
+  priority: "high";
+  /** Full order metadata so peers know what they're accepting without DB fetch */
+  orderMeta: {
+    restaurantName: string;
+    totalAmount: number;
+    itemCount: number;
+    status: string;
+  };
 }
 
 interface UseP2PDiscoveryOptions {
@@ -64,10 +84,11 @@ export function useP2PDiscovery(opts: UseP2PDiscoveryOptions) {
   const [meshSize, setMeshSize] = useState(0);
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number }>({ lat: 24.7136, lng: 46.6753 });
   const [connectionStatus, setConnectionStatus] = useState<"pending" | "subscribed" | "error" | "closed">("pending");
+  const [helpRequests, setHelpRequests] = useState<HelpRequestPayload[]>([]);
 
   const userId = session?.user?.id;
 
-  // Subscribe to announcements from other nodes + track connection status
+  // Subscribe to announcements + help requests + track connection status
   useEffect(() => {
     if (!userId || !enabled) return;
 
@@ -78,34 +99,75 @@ export function useP2PDiscovery(opts: UseP2PDiscoveryOptions) {
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     const subscribe = () => {
+      // Peer discovery announcements
       svc.subscribeSharedBroadcast<AnnouncePayload>(
         P2P_CHANNEL,
         ANNOUNCE_EVENT,
         (msg: SequencedMessage<AnnouncePayload>) => {
           const payload = msg.payload;
           console.log("P2P: Received broadcast from", payload);
-
-          // Don't cache self
           if (payload.id === userId) return;
-
-          // Store in DHT cache (TTL 20s — remove if no ping > 20s)
           cache.put(
-            {
-              id: payload.id,
-              role: payload.role,
-              displayName: payload.displayName,
-              latitude: payload.latitude,
-              longitude: payload.longitude,
-              isOnline: payload.isOnline,
-              lastSeen: Date.now(),
-              meta: {},
-            },
+            { id: payload.id, role: payload.role, displayName: payload.displayName,
+              latitude: payload.latitude, longitude: payload.longitude, isOnline: payload.isOnline,
+              lastSeen: Date.now(), meta: {} },
             20_000
           );
-
-          // Update React state by merging with existing map
           setPeers(cache.getAll());
           setMeshSize(cache.size);
+        }
+      );
+
+      // Emergency help requests from other drivers
+      svc.subscribeSharedBroadcast<HelpRequestPayload>(
+        P2P_CHANNEL,
+        HELP_REQUEST_EVENT,
+        (msg: SequencedMessage<HelpRequestPayload>) => {
+          const payload = msg.payload;
+          console.log("P2P: Received HELP_REQUEST", payload);
+          if (payload.driverId === userId) return; // ignore self
+
+          // Browser notification for emergency help request
+          if (typeof window !== "undefined" && "Notification" in window) {
+            if (Notification.permission === "granted") {
+              new Notification("طلب مساعدة طارئ!", {
+                body: `سائق ${payload.driverName} يحتاج مساعدة — طلب #${payload.orderId.slice(0, 7)} من ${payload.orderMeta.restaurantName}`,
+                icon: "/favicon.ico",
+                tag: payload.orderId,
+              });
+            } else if (Notification.permission !== "denied") {
+              Notification.requestPermission().then((perm) => {
+                if (perm === "granted") {
+                  new Notification("طلب مساعدة طارئ!", {
+                    body: `سائق ${payload.driverName} يحتاج مساعدة — طلب #${payload.orderId.slice(0, 7)} من ${payload.orderMeta.restaurantName}`,
+                    icon: "/favicon.ico",
+                    tag: payload.orderId,
+                  });
+                }
+              });
+            }
+          }
+
+          // Audio alert (soft beep) — high-priority signal should not be silent
+          try {
+            const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.frequency.value = 880; // A5
+            gain.gain.value = 0.15;
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.15);
+          } catch {
+            /* ignore audio errors */
+          }
+
+          setHelpRequests((prev) => {
+            // deduplicate by orderId, keep latest
+            const filtered = prev.filter((r) => r.orderId !== payload.orderId);
+            return [...filtered, payload];
+          });
         }
       );
 
@@ -235,6 +297,44 @@ export function useP2PDiscovery(opts: UseP2PDiscoveryOptions) {
     []
   );
 
+  // Broadcast a HELP_REQUEST to all peers
+  const sendHelpRequest = useCallback(
+    async (
+      orderId: string,
+      lat: number,
+      lng: number,
+      orderMeta: HelpRequestPayload["orderMeta"]
+    ) => {
+      if (!userId) return;
+      const svc = serviceRef.current;
+      const payload: HelpRequestPayload = {
+        type: "HELP_REQUEST",
+        orderId,
+        driverId: userId,
+        driverName: displayName,
+        latitude: lat,
+        longitude: lng,
+        timestamp: new Date().toISOString(),
+        priority: "high",
+        orderMeta,
+      };
+      await svc.sendBroadcast(
+        P2P_CHANNEL,
+        HELP_REQUEST_EVENT,
+        userId,
+        "help_request",
+        payload
+      );
+      console.log("[P2P] Sent HELP_REQUEST for order", orderId);
+    },
+    [userId, displayName]
+  );
+
+  // Remove a help request from the local list
+  const dismissHelpRequest = useCallback((orderId: string) => {
+    setHelpRequests((prev) => prev.filter((r) => r.orderId !== orderId));
+  }, []);
+
   // Force refresh peers list from cache
   const refreshPeers = useCallback(() => {
     const cache = cacheRef.current;
@@ -251,6 +351,8 @@ export function useP2PDiscovery(opts: UseP2PDiscoveryOptions) {
     myLocation,
     /** WebSocket connection status for the P2P channel */
     connectionStatus,
+    /** Active emergency help requests from peers */
+    helpRequests,
     /** Check if a peer is in the local cache */
     isPeerOnline,
     /** Get a peer from local cache */
@@ -259,5 +361,9 @@ export function useP2PDiscovery(opts: UseP2PDiscoveryOptions) {
     getNearbyDrivers,
     /** Refresh the peers list from cache */
     refreshPeers,
+    /** Broadcast a HELP_REQUEST */
+    sendHelpRequest,
+    /** Dismiss a received help request */
+    dismissHelpRequest,
   };
 }
