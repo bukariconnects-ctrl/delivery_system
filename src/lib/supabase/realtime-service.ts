@@ -66,6 +66,9 @@ export class RealtimeService {
   private channels = new Map<string, RealtimeChannel>();
   private sequenceTracker = new SequenceTracker();
   private localSeq = 0; // monotonic counter for outgoing messages
+  private subscribedChannels = new Set<string>(); // tracks already-subscribed exact-name channels
+  private channelStatus = new Map<string, "pending" | "subscribed" | "error" | "closed">();
+  private pendingResolvers = new Map<string, (() => void)[]>();
 
   constructor(private supabase: SupabaseClient) {}
 
@@ -86,12 +89,18 @@ export class RealtimeService {
     return ch;
   }
 
-  /** Unsubscribe and remove a channel */
-  async removeChannel(name: string) {
+  /** Remove a channel from local tracking and fire-and-forget Supabase cleanup */
+  removeChannel(name: string) {
     const ch = this.channels.get(name);
     if (ch) {
-      await this.supabase.removeChannel(ch);
+      // Synchronously clear local state so React Strict Mode re-mounts
+      // always see a clean slate and create a fresh channel object.
       this.channels.delete(name);
+      this.subscribedChannels.delete(name);
+      this.channelStatus.delete(name);
+      this.pendingResolvers.delete(name);
+      // Async Supabase cleanup — don't block; new mounts can proceed immediately
+      this.supabase.removeChannel(ch).catch(() => {});
     }
   }
 
@@ -124,6 +133,7 @@ export class RealtimeService {
       await this.removeChannel(name);
     }
     this.sequenceTracker.reset();
+    this.subscribedChannels.clear();
   }
 
   // ------------------------------------------------
@@ -161,7 +171,84 @@ export class RealtimeService {
   }
 
   /**
+   * Subscribe to broadcast messages on a SHARED channel.
+   * Uses the exact channel name (no suffix) so all nodes see each other.
+   * Safe for React Strict Mode: tracks subscription state to avoid duplicates.
+   */
+  subscribeSharedBroadcast<T = unknown>(
+    channelName: string,
+    event: string,
+    handler: MessageHandler<T>
+  ): RealtimeChannel {
+    const ch = this.getChannel(channelName);
+
+    if (!this.subscribedChannels.has(channelName)) {
+      // Attach listener + subscribe atomically so Strict Mode re-mounts
+      // don't duplicate handlers or re-call subscribe on the same instance.
+      ch.on("broadcast", { event }, ({ payload }) => {
+        const msg = payload as SequencedMessage<T>;
+
+        // Sender-order check (Lecture 4, Slide 11)
+        if (!this.sequenceTracker.check(msg.senderId, msg.seq)) {
+          console.warn(
+            `[RealtimeService] Out-of-order message dropped: sender=${msg.senderId} seq=${msg.seq}`
+          );
+          return;
+        }
+
+        handler(msg);
+      });
+
+      this.channelStatus.set(channelName, "pending");
+      ch.subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          this.channelStatus.set(channelName, "subscribed");
+          const resolvers = this.pendingResolvers.get(channelName) ?? [];
+          resolvers.forEach((r) => r());
+          this.pendingResolvers.delete(channelName);
+        } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          this.channelStatus.set(channelName, "error");
+        } else if (status === "CLOSED") {
+          this.channelStatus.set(channelName, "closed");
+          this.subscribedChannels.delete(channelName);
+        }
+      });
+      this.subscribedChannels.add(channelName);
+    }
+
+    return ch;
+  }
+
+  /**
+   * Wait for a channel to reach the 'subscribed' state.
+   * Returns true if subscribed, false on timeout.
+   */
+  async waitForSubscription(channelName: string, timeoutMs = 5000): Promise<boolean> {
+    const status = this.channelStatus.get(channelName);
+    if (status === "subscribed") return true;
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      const resolvers = this.pendingResolvers.get(channelName) ?? [];
+      resolvers.push(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+      this.pendingResolvers.set(channelName, resolvers);
+    });
+  }
+
+  /**
+   * Get the current status of a channel.
+   */
+  status(channelName: string): "pending" | "subscribed" | "error" | "closed" | undefined {
+    return this.channelStatus.get(channelName);
+  }
+
+  /**
    * Send a sequenced broadcast message (Multicast).
+   * Connection-aware: waits for the channel to be SUBSCRIBED before sending
+   * to avoid the REST API fallback and guarantee WebSocket delivery.
    * Returns the sequence number assigned to this message.
    */
   async sendBroadcast<T = unknown>(
@@ -173,6 +260,18 @@ export class RealtimeService {
   ): Promise<number> {
     const seq = ++this.localSeq;
     const ch = this.getChannel(channelName);
+
+    // Connection-aware dispatch: ensure WebSocket is ready before sending
+    const currentStatus = this.channelStatus.get(channelName);
+    if (currentStatus !== "subscribed") {
+      const ready = await this.waitForSubscription(channelName, 5000);
+      if (!ready) {
+        console.warn(
+          `[RealtimeService] Channel ${channelName} not subscribed after 5s; message dropped.`
+        );
+        return seq;
+      }
+    }
 
     const message: SequencedMessage<T> = {
       seq,

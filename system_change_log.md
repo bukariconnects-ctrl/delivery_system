@@ -45,6 +45,65 @@
 
 ## سجل التغييرات
 
+### [2026-06-01] — P2P Performance: Connection-Aware Dispatch + REST Fallback Elimination
+
+#### Problem
+P2P Discovery still showed **0 nodes** and the console flooded with:
+`Realtime send() is automatically falling back to REST API`.
+
+#### Root Cause
+`sendBroadcast()` was firing immediately — before the WebSocket channel reached the `SUBSCRIBED` state.
+Supabase Realtime falls back to the slower REST API when the channel is not joined, and REST broadcasts on shared topics like `p2p-mesh` are not visible to peer WebSocket listeners.
+
+#### Fixes Applied
+- **`src/lib/supabase/realtime-service.ts`**:
+  - Added `channelStatus` Map + `pendingResolvers` queue to track WebSocket lifecycle.
+  - Added `status(channelName)` getter — exposes `'pending' | 'subscribed' | 'error' | 'closed'`.
+  - Added `waitForSubscription(channelName, timeoutMs)` — blocks sends until WebSocket is ready.
+  - Rewrote `sendBroadcast()` as **connection-aware**: checks status before `send()`; waits up to 5s for `SUBSCRIBED`; drops message with a clear warning if timeout hits.
+  - Updated `subscribeSharedBroadcast()` to record status via the `subscribe(status)` callback.
+- **`src/hooks/use-p2p-discovery.ts`**:
+  - Exported `connectionStatus` state (`pending → subscribed → error → closed`).
+  - Added **Failure Masking** retry loop: polls status every 500ms; on `error`/`closed`, removes the channel and re-subscribes with exponential backoff (1s → 2s → 4s → 8s → 16s), max 5 retries.
+  - Announce interval now **only starts after `SUBSCRIBED`** — no more premature sends.
+  - Each announce call also guards with `if (status !== 'subscribed') skip`.
+- **`src/components/driver/NearbyPeers.tsx`**:
+  - Added real-time connection indicator: **green dot + Signal** (subscribed), **yellow pulse + Signal** (pending), **red dot + SignalZero** (error/closed).
+  - Tooltip shows raw `connectionStatus` string on hover.
+
+#### Distributed Concepts Verified
+- **Reliability:** Messages now travel exclusively through the high-speed WebSocket path.
+- **Failure Detection:** Status dot immediately shows if a node is isolated from the mesh.
+- **Failure Masking:** Automatic retry with exponential backoff hides transient disconnects.
+
+---
+
+### [2026-06-01] — P2P Mesh Discovery Fix (Requirement 8)
+
+#### Problem
+P2P Mesh Discovery showed **0 nodes** even when multiple driver windows were open.
+
+#### Root Cause
+`subscribeBroadcast` used `freshChannel()` which appends a monotonic suffix (`p2p-mesh::1`, `p2p-mesh::2`, etc.).
+This caused every browser window to subscribe to a **different Supabase topic**, so broadcasts never reached peers.
+
+#### Fixes Applied
+- **`src/lib/supabase/realtime-service.ts`**:
+  - Added `subscribeSharedBroadcast()` — uses the **exact** channel name (no suffix) for shared channels like `p2p-mesh`.
+  - Added `subscribedChannels` Set to prevent duplicate `.subscribe()` calls (React Strict Mode safe).
+  - Updated `removeChannel()` and `removeAll()` to clear subscription tracking.
+- **`src/hooks/use-p2p-discovery.ts`**:
+  - Switched to `subscribeSharedBroadcast` for the `p2p-mesh` channel.
+  - Added `console.log('P2P: Received broadcast from', payload)` for console debugging.
+  - Reduced announce interval from **10s → 5s** for faster peer discovery.
+  - Set peer cache TTL to **20s** (peers removed if no ping > 20s).
+  - Added `enabled` flag so discovery only runs when the driver is online.
+- **`src/app/dashboard/driver/page.tsx`** + **`src/components/driver/NearbyPeers.tsx`**:
+  - Pass `isOnline` explicitly to the discovery hook via `enabled` prop.
+  - Fixed `drivers:available-orders` broadcast to also use `subscribeSharedBroadcast`.
+
+---
+
 ### [2026-05-17] — التهيئة الأولية للمشروع
 
 #### 1. إنشاء ملف البيئة `.env.local`
@@ -1053,3 +1112,35 @@ NEXT_PUBLIC_APP_URL=https://localhost:3000
 1. Refresh the admin page
 2. Approvals tab → click "بطاقة الهوية" or "رخصة القيادة" — signed URL preview should now work
 3. DFS Explorer → السائقين → {اسم السائق} → identity — files should now appear
+
+### [2026-06-01] — P2P Mesh Discovery UI (Req 8)
+
+#### 1. New Component: `src/components/driver/NearbyPeers.tsx`
+- Radar-style visualization with concentric circles and animated scanning beam
+- Live list of discovered peer drivers with online status indicator (green dot)
+- Shows mesh node count and P2P stats footer (DHT Cache, TTL 30s, Broadcast 10s)
+- Uses `useP2PDiscovery` hook to receive real-time announcements on `p2p-mesh` channel
+- Calls `getNearbyDrivers()` from DHT cache to sort peers by haversine distance
+
+#### 2. Driver Dashboard Integration
+- **File**: `src/app/dashboard/driver/page.tsx`
+- `NearbyPeers` appears below the stats cards **only when the driver is online**
+- When driver clicks "الاتصال الآن" (`isOnline = true`), the component mounts and immediately starts broadcasting via `useP2PDiscovery` with `autoAnnounce: true`
+- When driver disconnects, the component unmounts and P2P announcements stop
+
+#### 3. Hook Enhancement
+- **File**: `src/hooks/use-p2p-discovery.ts`
+- Added `myLocation` state to expose this node's current announced position
+- Enables `NearbyPeers` to call `getNearbyDrivers(myLocation.lat, myLocation.lng)` for accurate relative distance computation
+
+#### 4. TTL Expiration Verification
+- **File**: `src/lib/supabase/p2p-cache.ts`
+- `defaultTtl: 30_000 ms` — entries expire after 30 seconds of no announcements
+- `evictionInterval: 10_000 ms` — background sweep every 10s removes stale entries
+- `get()` checks TTL on every read; expired entries are deleted on access
+- Result: if a driver closes the browser, they disappear from other drivers' lists within ~30s
+
+#### 5. Distributed Concepts
+- **P2P Resource Sharing (Req 8)**: No database queries — discovery is pure WebSocket broadcast via Supabase Realtime
+- **DHT Edge Cache**: Each driver maintains their own local view of the mesh, reducing central hub load
+- **Transparency (Req 2)**: Users see peers appear/disappear in real-time without manual refresh

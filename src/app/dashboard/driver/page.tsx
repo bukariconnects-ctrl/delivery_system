@@ -14,6 +14,7 @@ import {
 import { useSupabase } from "@/lib/supabase/provider";
 import { getRealtimeService } from "@/lib/supabase/realtime-service";
 import { useAcceptOrder } from "@/hooks/use-remote-actions";
+import { NearbyPeers } from "@/components/driver/NearbyPeers";
 import toast from "react-hot-toast";
 import type { Order, OrderItem, OrderStatus, Restaurant, OrderBroadcastPayload } from "@/types";
 
@@ -108,7 +109,7 @@ export default function DriverDashboard() {
       );
       
       // Subscribe to enriched broadcasts (Lecture 4, Slide 27)
-      svc.subscribeBroadcast<OrderBroadcastPayload>(
+      svc.subscribeSharedBroadcast<OrderBroadcastPayload>(
         "drivers:available-orders",
         "new_order",
         (msg) => {
@@ -235,6 +236,13 @@ export default function DriverDashboard() {
             <p className="text-xs text-gray-500">طلبات نشطة</p>
           </div>
         </div>
+
+        {/* P2P Mesh Discovery — Nearby Peers */}
+        {isOnline && (
+          <div className="mb-6">
+            <NearbyPeers displayName={session?.user?.email?.split("@")[0] ?? "Driver"} isOnline={isOnline} />
+          </div>
+        )}
 
         {loading ? (
           <div className="flex flex-col items-center gap-3 rounded-xl bg-white py-16 shadow-sm dark:bg-gray-800">
